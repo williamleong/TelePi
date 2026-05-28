@@ -520,11 +520,11 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
       const contextKey = getContextKey(target);
       const buttons = buttonsMap.get(contextKey);
       if (!buttons) {
-        await ctx.answerCallbackQuery({ text: expiredMessage });
+        await answerCallbackQuerySafely(ctx, { text: expiredMessage });
         return;
       }
 
-      await ctx.answerCallbackQuery();
+      await answerCallbackQuerySafely(ctx);
 
       try {
         const keyboard = buildKeyboard(buttons, page, prefix, extraButtonsMap?.get(contextKey) ?? []);
@@ -894,7 +894,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
 
   bot.callbackQuery("pi_abort", async (ctx) => {
     const target = getTelegramTarget(ctx);
-    await ctx.answerCallbackQuery({ text: "Aborting..." });
+    await answerCallbackQuerySafely(ctx, { text: "Aborting..." });
     if (!target) {
       return;
     }
@@ -903,7 +903,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   });
 
   bot.callbackQuery(NOOP_PAGE_CALLBACK_DATA, async (ctx) => {
-    await ctx.answerCallbackQuery();
+    await answerCallbackQuerySafely(ctx);
   });
 
   bot.callbackQuery(/^ui_sel_([a-z0-9]+)_(\d+)$/, async (ctx) => {
@@ -1025,17 +1025,17 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     const contextKey = getContextKey(target);
     const sessions = pendingSessionPicks.get(contextKey);
     if (!sessions || !sessions[index]) {
-      await ctx.answerCallbackQuery({ text: "Session expired, run /sessions again" });
+      await answerCallbackQuerySafely(ctx, { text: "Session expired, run /sessions again" });
       return;
     }
 
     if (isBusy(target)) {
-      await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
+      await answerCallbackQuerySafely(ctx, { text: "Wait for the current prompt to finish" });
       return;
     }
 
     const piSession = await getOrCreateSession(target);
-    await ctx.answerCallbackQuery({ text: "Switching..." });
+    await answerCallbackQuerySafely(ctx, { text: "Switching..." });
     pendingSessionPicks.delete(contextKey);
     pendingSessionButtons.delete(contextKey);
 
@@ -1105,17 +1105,17 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     const contextKey = getContextKey(target);
     const workspaces = pendingWorkspacePicks.get(contextKey);
     if (!workspaces || !workspaces[index]) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /new again" });
+      await answerCallbackQuerySafely(ctx, { text: "Expired, run /new again" });
       return;
     }
 
     if (isBusy(target)) {
-      await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
+      await answerCallbackQuerySafely(ctx, { text: "Wait for the current prompt to finish" });
       return;
     }
 
     const piSession = await getOrCreateSession(target);
-    await ctx.answerCallbackQuery({ text: "Creating session..." });
+    await answerCallbackQuerySafely(ctx, { text: "Creating session..." });
     pendingWorkspacePicks.delete(contextKey);
     pendingWorkspaceButtons.delete(contextKey);
 
@@ -1173,16 +1173,16 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     const piSession = getExistingSession(target);
     const models = pendingModelPicks.get(contextKey);
     if (!models || models.length === 0 || !piSession) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /model again" });
+      await answerCallbackQuerySafely(ctx, { text: "Expired, run /model again" });
       return;
     }
 
     if (isBusy(target)) {
-      await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
+      await answerCallbackQuerySafely(ctx, { text: "Wait for the current prompt to finish" });
       return;
     }
 
-    await ctx.answerCallbackQuery({ text: "Loading all models..." });
+    await answerCallbackQuerySafely(ctx, { text: "Loading all models..." });
     await renderModelPicker(ctx, target, piSession, { showAll: true, messageId });
   });
 
@@ -1199,16 +1199,16 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     const piSession = getExistingSession(target);
     const models = pendingModelPicks.get(contextKey);
     if (!models || !models[index] || !piSession) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /model again" });
+      await answerCallbackQuerySafely(ctx, { text: "Expired, run /model again" });
       return;
     }
 
     if (isBusy(target)) {
-      await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
+      await answerCallbackQuerySafely(ctx, { text: "Wait for the current prompt to finish" });
       return;
     }
 
-    await ctx.answerCallbackQuery({ text: "Switching model..." });
+    await answerCallbackQuerySafely(ctx, { text: "Switching model..." });
     pendingModelPicks.delete(contextKey);
     pendingModelButtons.delete(contextKey);
     pendingModelExtraButtons.delete(contextKey);

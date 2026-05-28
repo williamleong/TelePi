@@ -11,6 +11,7 @@ import {
 import { renderFailedText, stripHtml } from "./message-rendering.js";
 import type { KeyboardItem } from "./keyboard.js";
 import type { TextOptions } from "./telegram-transport.js";
+import { answerCallbackQuerySafely } from "./callback-query-logging.js";
 
 export type PendingTreeView = {
   mode: TreeFilterMode;
@@ -105,17 +106,17 @@ export function registerTreeCallbacks(deps: {
     const piSession = getExistingSession(target);
 
     if (isBusy(target)) {
-      await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
+      await answerCallbackQuerySafely(ctx, { text: "Wait for the current prompt to finish" });
       return;
     }
 
     const pendingId = pendingTreeNavs.get(contextKey);
     if (pendingId !== entryId || !piSession) {
-      await ctx.answerCallbackQuery({ text: options?.expiredText ?? "Confirmation expired. Use /branch again." });
+      await answerCallbackQuerySafely(ctx, { text: options?.expiredText ?? "Confirmation expired. Use /branch again." });
       return;
     }
 
-    await ctx.answerCallbackQuery({ text: options?.busyText ?? "Navigating..." });
+    await answerCallbackQuerySafely(ctx, { text: options?.busyText ?? "Navigating..." });
     pendingTreeNavs.delete(contextKey);
     pendingBranchButtons.delete(contextKey);
     clearPendingTreeView(contextKey);
@@ -150,25 +151,25 @@ export function registerTreeCallbacks(deps: {
     const page = Number.parseInt(ctx.match?.[1] ?? "", 10);
 
     if (!target || !messageId || Number.isNaN(page)) {
-      await ctx.answerCallbackQuery();
+      await answerCallbackQuerySafely(ctx);
       return;
     }
 
     const contextKey = getContextKey(target);
     const pendingTreeView = pendingTreeViews.get(contextKey);
     if (!pendingTreeView) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /tree again" });
+      await answerCallbackQuerySafely(ctx, { text: "Expired, run /tree again" });
       return;
     }
 
     if (isBusy(target)) {
-      await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
+      await answerCallbackQuerySafely(ctx, { text: "Wait for the current prompt to finish" });
       return;
     }
 
     const piSession = getExistingSession(target);
     if (!piSession?.hasActiveSession()) {
-      await ctx.answerCallbackQuery({ text: "No active session" });
+      await answerCallbackQuerySafely(ctx, { text: "No active session" });
       return;
     }
 
@@ -177,7 +178,7 @@ export function registerTreeCallbacks(deps: {
       page,
     });
 
-    await ctx.answerCallbackQuery();
+    await answerCallbackQuerySafely(ctx);
     await safeEditMessage(target, messageId, result.text, {
       fallbackText: stripHtml(result.text),
       replyMarkup: result.buttons.length > 0 ? buildTreeKeyboard(result.buttons) : undefined,
@@ -189,7 +190,7 @@ export function registerTreeCallbacks(deps: {
     const messageId = ctx.callbackQuery?.message?.message_id;
     const entryId = ctx.match?.[1];
     if (!target || !entryId) {
-      await ctx.answerCallbackQuery();
+      await answerCallbackQuerySafely(ctx);
       return;
     }
 
@@ -197,28 +198,28 @@ export function registerTreeCallbacks(deps: {
     const piSession = getExistingSession(target);
 
     if (isBusy(target)) {
-      await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
+      await answerCallbackQuerySafely(ctx, { text: "Wait for the current prompt to finish" });
       return;
     }
 
     if (!piSession?.hasActiveSession()) {
-      await ctx.answerCallbackQuery({ text: "No active session" });
+      await answerCallbackQuerySafely(ctx, { text: "No active session" });
       return;
     }
 
     const entry = piSession.getEntry(entryId);
     if (!entry) {
-      await ctx.answerCallbackQuery({ text: "Entry not found" });
+      await answerCallbackQuerySafely(ctx, { text: "Entry not found" });
       return;
     }
 
     const leafId = piSession.getLeafId();
     if (entry.id === leafId) {
-      await ctx.answerCallbackQuery({ text: "Already at this point" });
+      await answerCallbackQuerySafely(ctx, { text: "Already at this point" });
       return;
     }
 
-    await ctx.answerCallbackQuery({ text: "Loading..." });
+    await answerCallbackQuerySafely(ctx, { text: "Loading..." });
 
     const confirmation = renderBranchConfirmation(
       entry,
@@ -248,7 +249,7 @@ export function registerTreeCallbacks(deps: {
     const target = getTelegramTarget(ctx);
     const entryId = ctx.match?.[1];
     if (!target || !entryId) {
-      await ctx.answerCallbackQuery();
+      await answerCallbackQuerySafely(ctx);
       return;
     }
 
@@ -259,7 +260,7 @@ export function registerTreeCallbacks(deps: {
     const target = getTelegramTarget(ctx);
     const entryId = ctx.match?.[1];
     if (!target || !entryId) {
-      await ctx.answerCallbackQuery();
+      await answerCallbackQuerySafely(ctx);
       return;
     }
 
@@ -277,7 +278,7 @@ export function registerTreeCallbacks(deps: {
       pendingBranchButtons.delete(contextKey);
       clearPendingTreeView(contextKey);
     }
-    await ctx.answerCallbackQuery({ text: "Cancelled" });
+    await answerCallbackQuerySafely(ctx, { text: "Cancelled" });
     const messageId = ctx.callbackQuery?.message?.message_id;
     if (target && messageId) {
       await safeEditMessage(target, messageId, escapeHTML("Navigation cancelled."), {
@@ -291,29 +292,29 @@ export function registerTreeCallbacks(deps: {
     const messageId = ctx.callbackQuery?.message?.message_id;
     const mode = ctx.match?.[1];
     if (!target || !messageId) {
-      await ctx.answerCallbackQuery();
+      await answerCallbackQuerySafely(ctx);
       return;
     }
 
     const contextKey = getContextKey(target);
     const pendingTreeView = pendingTreeViews.get(contextKey);
     if (!pendingTreeView) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /tree again" });
+      await answerCallbackQuerySafely(ctx, { text: "Expired, run /tree again" });
       return;
     }
 
     if (isBusy(target)) {
-      await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
+      await answerCallbackQuerySafely(ctx, { text: "Wait for the current prompt to finish" });
       return;
     }
 
     const piSession = getExistingSession(target);
     if (!piSession?.hasActiveSession()) {
-      await ctx.answerCallbackQuery({ text: "No active session" });
+      await answerCallbackQuerySafely(ctx, { text: "No active session" });
       return;
     }
 
-    await ctx.answerCallbackQuery();
+    await answerCallbackQuerySafely(ctx);
 
     let filterMode: TreeFilterMode = "default";
     if (mode === "all") {

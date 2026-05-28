@@ -14,6 +14,7 @@ import {
   type CommandPickerFilter,
 } from "./slash-command.js";
 import type { TextOptions } from "./telegram-transport.js";
+import { answerCallbackQuerySafely } from "./callback-query-logging.js";
 
 export type PendingCommandPicker = {
   messageId: number;
@@ -230,7 +231,7 @@ export function createCommandPickerHandlers(deps: {
 
     const activePicker = getPendingCommandPicker(target, messageId);
     if (!activePicker) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /commands again" });
+      await answerCallbackQuerySafely(ctx, { text: "Expired, run /commands again" });
       return;
     }
 
@@ -239,7 +240,7 @@ export function createCommandPickerHandlers(deps: {
     activePicker.picker.page = rendered.page;
     pendingCommandPickers.set(activePicker.contextKey, activePicker.picker);
 
-    await ctx.answerCallbackQuery();
+    await answerCallbackQuerySafely(ctx);
     await safeEditMessage(target, messageId, rendered.text, {
       fallbackText: rendered.fallbackText,
       parseMode: rendered.parseMode,
@@ -258,7 +259,7 @@ export function createCommandPickerHandlers(deps: {
 
     const activePicker = getPendingCommandPicker(target, messageId);
     if (!activePicker) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /commands again" });
+      await answerCallbackQuerySafely(ctx, { text: "Expired, run /commands again" });
       return;
     }
 
@@ -268,7 +269,7 @@ export function createCommandPickerHandlers(deps: {
     activePicker.picker.page = rendered.page;
     pendingCommandPickers.set(activePicker.contextKey, activePicker.picker);
 
-    await ctx.answerCallbackQuery({ text: `Showing ${getCommandPickerFilterName(filter)} commands` });
+    await answerCallbackQuerySafely(ctx, { text: `Showing ${getCommandPickerFilterName(filter)} commands` });
     await safeEditMessage(target, messageId, rendered.text, {
       fallbackText: rendered.fallbackText,
       parseMode: rendered.parseMode,
@@ -287,30 +288,30 @@ export function createCommandPickerHandlers(deps: {
 
     const activePicker = getPendingCommandPicker(target, messageId);
     if (!activePicker) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /commands again" });
+      await answerCallbackQuerySafely(ctx, { text: "Expired, run /commands again" });
       return;
     }
 
     const entry = activePicker.picker.entries.find((item) => item.id === index);
     if (!entry) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /commands again" });
+      await answerCallbackQuerySafely(ctx, { text: "Expired, run /commands again" });
       return;
     }
 
     if (entry.kind === "pi") {
       if (isBusy(target)) {
-        await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
+        await answerCallbackQuerySafely(ctx, { text: "Wait for the current prompt to finish" });
         return;
       }
 
       pendingCommandPickers.delete(activePicker.contextKey);
-      await ctx.answerCallbackQuery({ text: `Running ${trimLine(entry.commandText, 32)}` });
+      await answerCallbackQuerySafely(ctx, { text: `Running ${trimLine(entry.commandText, 32)}` });
       await handleUserPrompt(ctx, target, entry.commandText);
       return;
     }
 
     pendingCommandPickers.delete(activePicker.contextKey);
-    await ctx.answerCallbackQuery({ text: `Opening ${trimLine(entry.commandText, 32)}` });
+    await answerCallbackQuerySafely(ctx, { text: `Opening ${trimLine(entry.commandText, 32)}` });
     await runTelePiPickerCommand(ctx, target, entry.command);
   });
 

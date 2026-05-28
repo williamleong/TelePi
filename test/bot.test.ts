@@ -1451,6 +1451,14 @@ describe("createBot", () => {
     expect(ready.pi.service.switchSession).toHaveBeenCalledWith("/s2.jsonl", "/workspace/B");
     expect(ready.api.editMessageText).toHaveBeenCalled();
 
+    const staleAnswer = setupBot();
+    await staleAnswer.bot.handleUpdate(createTestUpdate({ message: { text: "/sessions" } }));
+    staleAnswer.api.answerCallbackQuery.mockRejectedValueOnce(new Error("query is too old"));
+    await staleAnswer.bot.handleUpdate(createCallbackUpdate("switch_0"));
+
+    expect(staleAnswer.pi.service.resolveSessionReference).toHaveBeenCalledWith("/s1.jsonl");
+    expect(staleAnswer.pi.service.switchSession).toHaveBeenCalledWith("/s1.jsonl", "/workspace/A");
+
     const cancelled = setupBot({
       piSessionOverrides: {
         switchSession: vi.fn().mockResolvedValue({

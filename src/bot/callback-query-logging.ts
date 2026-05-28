@@ -95,6 +95,26 @@ function buildCallbackDetails(
   return details.length > 0 ? ` (${details.join(", ")})` : "";
 }
 
+export async function answerCallbackQuerySafely(
+  ctx: Context,
+  options?: Parameters<Context["answerCallbackQuery"]>[0],
+  logOptions?: { source?: string },
+): Promise<void> {
+  const responseText = typeof options === "object" && options !== null && "text" in options
+    ? options.text
+    : undefined;
+
+  try {
+    await ctx.answerCallbackQuery(options);
+  } catch (error) {
+    logCallbackQueryError(ctx, error, {
+      phase: "answer",
+      source: logOptions?.source,
+      responseText,
+    });
+  }
+}
+
 export function logCallbackQueryError(
   ctx: Pick<Context, "callbackQuery">,
   error: unknown,
