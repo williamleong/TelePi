@@ -61,6 +61,7 @@ describe("loadConfig", () => {
       promptInboxDir: undefined,
       promptInboxIntervalMs: 60000,
     });
+    expect(process.env.PI_SESSION_PATH).toBeUndefined();
   });
 
   it("throws when TELEGRAM_BOT_TOKEN is missing", () => {

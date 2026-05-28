@@ -1,5 +1,5 @@
 import { createBot, registerCommands } from "./bot.js";
-import { loadConfig } from "./config.js";
+import { clearPersistentPiSessionPathEnv, loadConfig } from "./config.js";
 import { isEntrypoint } from "./entrypoint.js";
 import { PiSessionRegistry } from "./pi-session.js";
 
@@ -14,6 +14,9 @@ export async function startBot(): Promise<void> {
 
   try {
     const config = loadConfig();
+    if (config.piSessionPath) {
+      clearPersistentPiSessionPathEnv();
+    }
     sessionRegistry = await PiSessionRegistry.create(config);
     bot = createBot(config, sessionRegistry);
     await registerCommands(bot);

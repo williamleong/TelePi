@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -43,7 +44,7 @@ export function loadConfig(): TelePiConfig {
   const telegramBotToken = requireEnv("TELEGRAM_BOT_TOKEN");
   const telegramAllowedUserIds = parseAllowedUserIds(requireEnv("TELEGRAM_ALLOWED_USER_IDS"));
   const workspace = resolveWorkspace();
-  const piSessionPath = optionalString(process.env.PI_SESSION_PATH);
+  const piSessionPath = consumePiSessionPathEnv();
   const piModel = optionalString(process.env.PI_MODEL);
   const toolVerbosity = parseToolVerbosity(optionalString(process.env.TOOL_VERBOSITY));
   const promptInboxDir = resolveOptionalPath(process.env.TELEPI_PROMPT_INBOX_DIR);
@@ -168,6 +169,44 @@ function requireEnv(name: string): string {
     throw new Error(`Missing required environment variable: ${name}`);
   }
   return value;
+}
+
+export function consumePiSessionPathEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const sessionPath = optionalString(env.PI_SESSION_PATH);
+  if (sessionPath) {
+    delete env.PI_SESSION_PATH;
+  }
+  return sessionPath;
+}
+
+export function clearPersistentPiSessionPathEnv(platform: NodeJS.Platform = process.platform): void {
+  const unsetCommand = getPiSessionPathUnsetCommand(platform);
+  if (!unsetCommand) {
+    return;
+  }
+
+  try {
+    spawnSync(unsetCommand.command, unsetCommand.args, {
+      stdio: "ignore",
+      timeout: 2000,
+    });
+  } catch {
+    // Best effort: TelePi should still start even if launchctl/systemctl is unavailable.
+  }
+}
+
+export function getPiSessionPathUnsetCommand(
+  platform: NodeJS.Platform,
+): { command: string; args: string[] } | undefined {
+  if (platform === "darwin") {
+    return { command: "launchctl", args: ["unsetenv", "PI_SESSION_PATH"] };
+  }
+
+  if (platform === "linux") {
+    return { command: "systemctl", args: ["--user", "unset-environment", "PI_SESSION_PATH"] };
+  }
+
+  return undefined;
 }
 
 function optionalString(value: string | undefined): string | undefined {
