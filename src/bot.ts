@@ -74,6 +74,7 @@ const TYPING_INTERVAL_MS = 4500;
 const EXTENSION_UI_TIMEOUT_MS = 60_000;
 const DEFAULT_IMAGE_PROMPT = "Please analyze this image.";
 const CALLBACK_MESSAGE_CONTEXT_LIMIT = 1000;
+const THREADLESS_FORUM_CALLBACK_EXPIRED_TEXT = "Expired, run the command again in this topic";
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   ".jpg": "image/jpeg",
@@ -191,6 +192,29 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
 
     const trackedTarget = getTrackedCallbackTarget(ctx);
     return trackedTarget ? cloneTarget(trackedTarget) : target;
+  };
+
+  const isExtensionDialogCallback = (data: string | undefined): boolean =>
+    data !== undefined && /^ui_(?:sel|cfm|x)_/.test(data);
+
+  const isUntrackedThreadlessForumCallback = (ctx: Context): boolean => {
+    const callbackQuery = ctx.callbackQuery;
+    const message = callbackQuery?.message;
+    if (!callbackQuery || !message || isExtensionDialogCallback(callbackQuery.data)) {
+      return false;
+    }
+
+    const chat = message.chat as { type?: string; is_forum?: boolean };
+    if (chat.type !== "supergroup" || chat.is_forum !== true) {
+      return false;
+    }
+
+    const messageThreadId = "message_thread_id" in message ? message.message_thread_id : undefined;
+    if (messageThreadId !== undefined) {
+      return false;
+    }
+
+    return getTrackedCallbackTarget(ctx) === undefined;
   };
 
   const withCallbackMessageTracking = (target: PiSessionContext, options: TextOptions = {}): TextOptions => {
@@ -522,6 +546,11 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
       } else if (ctx.chat) {
         await safeReply(ctx, escapeHTML("Unauthorized"), { fallbackText: "Unauthorized" });
       }
+      return;
+    }
+
+    if (isUntrackedThreadlessForumCallback(ctx)) {
+      await ctx.answerCallbackQuery({ text: THREADLESS_FORUM_CALLBACK_EXPIRED_TEXT }).catch(() => {});
       return;
     }
 

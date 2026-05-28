@@ -1253,6 +1253,35 @@ describe("createBot", () => {
     expect(api.sendChatAction).toHaveBeenCalledWith(ALLOWED_CHAT_ID, "typing", 101);
   });
 
+  it("expires untracked forum callbacks without using the root chat context", async () => {
+    const { bot, api, pi } = setupBot();
+
+    await bot.handleUpdate(
+      createTestUpdate({
+        message: {
+          text: "/sessions",
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+        },
+      }),
+    );
+
+    await bot.handleUpdate(
+      createCallbackUpdate("switch_0", {
+        callback_query: {
+          message: {
+            message_id: 999,
+            chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          },
+        },
+      }),
+    );
+
+    expect(pi.service.switchSession).not.toHaveBeenCalled();
+    expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", {
+      text: "Expired, run the command again in this topic",
+    });
+  });
+
   it("recovers the topic for session picker callbacks when Telegram omits the thread id", async () => {
     const topicKey = makeContextKey(ALLOWED_CHAT_ID, 101);
     const { bot, api, registry } = setupBot({
