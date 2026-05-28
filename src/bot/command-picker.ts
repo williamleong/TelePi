@@ -164,7 +164,24 @@ export function createCommandPickerHandlers(deps: {
     options?: { messageId?: number; filter?: CommandPickerFilter; page?: number },
   ): Promise<void> => {
     const contextKey = getContextKey(target);
-    const piSession = await getOrCreateSession(target);
+    let piSession: PiSessionService;
+    try {
+      piSession = await getOrCreateSession(target);
+    } catch (error) {
+      const failure = renderPrefixedError("Failed to create session", error);
+      if (options?.messageId) {
+        await safeEditMessage(target, options.messageId, failure.text, {
+          fallbackText: failure.fallbackText,
+          parseMode: failure.parseMode,
+        });
+      } else {
+        await safeReply(ctx, failure.text, {
+          fallbackText: failure.fallbackText,
+          parseMode: failure.parseMode,
+        }, target);
+      }
+      return;
+    }
 
     let slashCommands: SlashCommandInfo[];
     try {

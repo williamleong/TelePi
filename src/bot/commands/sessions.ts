@@ -64,7 +64,18 @@ export function createSessionCommandHandlers(deps: {
       return;
     }
 
-    const piSession = await getOrCreateSession(target);
+    let piSession: PiSessionService;
+    try {
+      piSession = await getOrCreateSession(target);
+    } catch (error) {
+      const failure = renderPrefixedError("Failed to create session", error);
+      await safeReply(ctx, failure.text, {
+        fallbackText: failure.fallbackText,
+        parseMode: failure.parseMode,
+      }, target);
+      return;
+    }
+
     const rawText = commandText ?? ctx.message?.text ?? "";
     const sessionReference = rawText.replace(/^\/(?:sessions|switch)(?:@\w+)?\s*/, "").trim();
     if (sessionReference) {
@@ -146,7 +157,18 @@ export function createSessionCommandHandlers(deps: {
       return;
     }
 
-    const piSession = await getOrCreateSession(target);
+    let piSession: PiSessionService;
+    try {
+      piSession = await getOrCreateSession(target);
+    } catch (error) {
+      const failure = renderPrefixedError("Failed to create session", error);
+      await safeReply(ctx, failure.text, {
+        fallbackText: failure.fallbackText,
+        parseMode: failure.parseMode,
+      }, target);
+      return;
+    }
+
     const workspaces = await piSession.listWorkspaces();
 
     if (workspaces.length <= 1) {

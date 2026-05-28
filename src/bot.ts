@@ -1275,7 +1275,18 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     }
 
     if (normalizedSlashCommand) {
-      const piSession = await getOrCreateSession(target);
+      let piSession: PiSessionService;
+      try {
+        piSession = await getOrCreateSession(target);
+      } catch (error) {
+        const failure = renderPrefixedError("Failed to create session", error);
+        await safeReply(ctx, failure.text, {
+          fallbackText: failure.fallbackText,
+          parseMode: failure.parseMode,
+        }, target);
+        return;
+      }
+
       const slashCommands = await piSession.listSlashCommands();
       void syncChatScopedCommands(target, slashCommands).catch((error) => {
         console.error("Failed to sync chat-scoped Telegram commands", error);

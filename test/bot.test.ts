@@ -95,6 +95,7 @@ type SetupOptions = {
   configOverrides?: Partial<TelePiConfig>;
   piSessionOverrides?: Partial<PiSessionService>;
   perContextSessionOverrides?: Record<string, Partial<PiSessionService>>;
+  getOrCreateError?: Error;
 };
 
 function createConfig(overrides: Partial<TelePiConfig> = {}): TelePiConfig {
@@ -414,6 +415,10 @@ function createMockPiSessionRegistry(options: SetupOptions = {}) {
 
   const registry = {
     getOrCreate: vi.fn(async (context: PiSessionContext) => {
+      if (options.getOrCreateError) {
+        throw options.getOrCreateError;
+      }
+
       const contextKey = makeContextKey(context.chatId, context.messageThreadId);
       let entry = services.get(contextKey);
       if (!entry) {
@@ -977,6 +982,18 @@ describe("createBot", () => {
     expect(api.sendMessage).toHaveBeenCalledTimes(1);
     expect(api.sendMessage.mock.calls[0]?.[1]).toBe("Unauthorized");
   });
+
+  it.each(["/start", "/commands", "/sessions", "/new", "/model"])(
+    "surfaces session bootstrap failures for %s",
+    async (command) => {
+      const { bot, api } = setupBot({ getOrCreateError: new Error("auth missing") });
+
+      await bot.handleUpdate(createTestUpdate({ message: { text: command } }));
+
+      expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Failed to create session:");
+      expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("auth missing");
+    },
+  );
 
   it("handles /session", async () => {
     const { bot, api } = setupBot();

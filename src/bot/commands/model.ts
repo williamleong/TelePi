@@ -105,7 +105,17 @@ export function createModelCommandHandlers(deps: {
   const handleModelCommand = async (ctx: Context, target: PiSessionContext): Promise<void> => {
     const existing = getExistingSession(target);
     const hadActiveSession = existing?.hasActiveSession() === true;
-    const piSession = await getOrCreateSession(target);
+    let piSession: PiSessionService;
+    try {
+      piSession = await getOrCreateSession(target);
+    } catch (error) {
+      const failure = renderPrefixedError("Failed to create session", error);
+      await safeReply(ctx, failure.text, {
+        fallbackText: failure.fallbackText,
+        parseMode: failure.parseMode,
+      }, target);
+      return;
+    }
 
     if (!piSession.hasActiveSession()) {
       try {
