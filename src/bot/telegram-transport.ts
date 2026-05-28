@@ -162,7 +162,7 @@ export async function downloadTelegramFile(
     throw new Error(`Failed to download ${options.fileKind ?? "voice file"}: ${response.status}`);
   }
 
-  const contentLength = parseContentLength(response.headers.get("content-length"));
+  const contentLength = parseContentLength(response.headers?.get?.("content-length") ?? null);
   if (contentLength !== undefined && contentLength > maxFileSizeBytes) {
     throw createFileTooLargeError(label, contentLength, maxFileSizeBytes);
   }

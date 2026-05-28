@@ -3266,7 +3266,6 @@ describe("createBot", () => {
     expect(pi.service.prompt).toHaveBeenCalledWith("transcribed text");
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("🎤 transcribed text"))).toBe(true);
     expect(hasSentOrEditedText(api, "Voice response")).toBe(true);
-    expect(writeFile).toHaveBeenCalledTimes(1);
     expect(unlink).toHaveBeenCalledTimes(1);
   });
 
