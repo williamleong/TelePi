@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -23,6 +23,24 @@ describe("prompt inbox", () => {
     await expect(claimNextPromptInboxFile(path.join(tempDir, "missing"))).resolves.toBeUndefined();
   });
 
+  it("claims prompts by moving them to a processing file", async () => {
+    const promptPath = path.join(inboxDir, "daily.txt");
+    writeFileSync(promptPath, "daily briefing");
+
+    const claimed = await claimNextPromptInboxFile(inboxDir);
+
+    expect(claimed).toMatchObject({
+      originalPath: promptPath,
+      path: `${promptPath}.processing`,
+      prompt: "daily briefing",
+    });
+    expect(existsSync(promptPath)).toBe(false);
+    expect(statSync(`${promptPath}.processing`).isFile()).toBe(true);
+
+    await claimed?.ack();
+    expect(existsSync(`${promptPath}.processing`)).toBe(false);
+  });
+
   it("claims the oldest non-empty txt prompt and ignores other entries", async () => {
     writeFileSync(path.join(inboxDir, "ignore.md"), "ignored");
     mkdirSync(path.join(inboxDir, "nested.txt"));
@@ -41,11 +59,20 @@ describe("prompt inbox", () => {
 
     const claimed = await claimNextPromptInboxFile(inboxDir);
 
-    expect(claimed).toMatchObject({ prompt: "older prompt", path: olderPath });
-    expect(statSync(olderPath).isFile()).toBe(true);
+    expect(claimed).toMatchObject({
+      prompt: "older prompt",
+      originalPath: olderPath,
+      path: `${olderPath}.processing`,
+    });
+    expect(existsSync(olderPath)).toBe(false);
+    expect(statSync(`${olderPath}.processing`).isFile()).toBe(true);
 
     await claimed?.ack();
-    await expect(claimNextPromptInboxFile(inboxDir)).resolves.toMatchObject({ prompt: "newer prompt", path: newerPath });
+    await expect(claimNextPromptInboxFile(inboxDir)).resolves.toMatchObject({
+      prompt: "newer prompt",
+      originalPath: newerPath,
+      path: `${newerPath}.processing`,
+    });
   });
 
   it("deletes empty txt files until no prompt remains", async () => {
@@ -72,7 +99,7 @@ describe("prompt inbox", () => {
     await expect(import("node:fs/promises").then(({ stat }) => stat(promptPath))).rejects.toThrow();
   });
 
-  it("leaves a prompt queued when dispatch refuses it", async () => {
+  it("moves a prompt to failed when dispatch refuses it", async () => {
     const promptPath = path.join(inboxDir, "race.txt");
     writeFileSync(promptPath, "try after current prompt");
     const handlePrompt = vi.fn().mockResolvedValue(false);
@@ -82,10 +109,11 @@ describe("prompt inbox", () => {
       target: { chatId: 123 },
       isBusy: () => false,
       handlePrompt,
-    })).resolves.toBe("busy");
+    })).resolves.toBe("failed");
 
     expect(handlePrompt).toHaveBeenCalledWith({ chatId: 123 }, "try after current prompt");
-    expect(statSync(promptPath).isFile()).toBe(true);
+    expect(existsSync(promptPath)).toBe(false);
+    expect(statSync(`${promptPath}.failed`).isFile()).toBe(true);
   });
 
   it("leaves queued prompts untouched while the target chat is busy", async () => {

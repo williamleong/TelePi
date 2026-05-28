@@ -595,7 +595,9 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
       target,
       isBusy,
       handlePrompt: async (promptTarget, prompt) =>
-        await handleUserPrompt({ api: bot.api } as Context, promptTarget, prompt),
+        await handleUserPrompt({ api: bot.api } as Context, promptTarget, prompt, undefined, undefined, {
+          waitForCompletion: true,
+        }),
       onError: (error) => {
         console.error("Prompt inbox polling failed", error);
       },

@@ -31,12 +31,17 @@ import type { ExtensionDialogManager } from "./extension-dialogs.js";
 import type { ChatTaskRunner } from "./chat-task-runner.js";
 import type { PiSessionContext, PiSessionService } from "../pi-session.js";
 
+export interface HandleUserPromptOptions {
+  waitForCompletion?: boolean;
+}
+
 export type HandleUserPrompt = (
   ctx: Context,
   target: PiSessionContext,
   userText: string,
   preloadedSlashCommands?: SlashCommandInfo[],
   images?: ImageContent[],
+  options?: HandleUserPromptOptions,
 ) => Promise<boolean>;
 
 interface CreatePromptHandlerOptions {
@@ -56,6 +61,8 @@ interface CreatePromptHandlerOptions {
 
 type PromptFlowDeps = Omit<CreatePromptHandlerOptions, "isBusy" | "taskRunner" | "sendBusyReply">;
 
+type PromptTaskOutcome = "completed" | "failed";
+
 type ToolState = {
   toolName: string;
   partialResult: string;
@@ -70,7 +77,7 @@ async function runPromptFlow(
   userText: string,
   preloadedSlashCommands?: SlashCommandInfo[],
   images?: ImageContent[],
-): Promise<void> {
+): Promise<PromptTaskOutcome> {
   const {
     bot,
     toolVerbosity,
@@ -343,7 +350,7 @@ async function runPromptFlow(
   }
   if (!piSession) {
     stopTyping();
-    return;
+    return "failed";
   }
 
   const slashCommands = preloadedSlashCommands;
@@ -519,6 +526,7 @@ async function runPromptFlow(
       await piSession.prompt(userText);
     }
     await finalizeResponse();
+    return "completed";
   } catch (error) {
     stopTyping();
     clearFlushTimer();
@@ -543,6 +551,7 @@ async function runPromptFlow(
         console.error("Failed to send error message to Telegram:", telegramError);
       }
     }
+    return "failed";
   } finally {
     stopTyping();
     clearFlushTimer();
@@ -564,20 +573,33 @@ export function createPromptHandler(options: CreatePromptHandlerOptions): Handle
     userText: string,
     preloadedSlashCommands?: SlashCommandInfo[],
     images?: ImageContent[],
+    options?: HandleUserPromptOptions,
   ): Promise<boolean> => {
     if (isBusy(target)) {
       await sendBusyReply(ctx);
       return false;
     }
 
+    let completion: Promise<PromptTaskOutcome> | undefined;
     const result = taskRunner.tryStartPrompt(
       target,
       userText,
-      () => runPromptFlow(promptFlowDeps, ctx, target, userText, preloadedSlashCommands, images),
+      () => {
+        completion = runPromptFlow(promptFlowDeps, ctx, target, userText, preloadedSlashCommands, images);
+        return completion.then(() => undefined);
+      },
     );
     if (result === "busy") {
       await sendBusyReply(ctx);
       return false;
+    }
+
+    if (options?.waitForCompletion && completion) {
+      const outcome = await completion.catch((error) => {
+        console.error("Prompt task failed while waiting for completion", formatError(error));
+        return "failed" as const;
+      });
+      return outcome === "completed";
     }
 
     return true;

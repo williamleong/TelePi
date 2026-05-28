@@ -1,10 +1,10 @@
 import type { Dirent } from "node:fs";
-import { readdir, readFile, rm, stat } from "node:fs/promises";
+import { readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { PiSessionContext } from "../pi-session.js";
 
-export type PromptInboxPollResult = "busy" | "empty" | "queued";
+export type PromptInboxPollResult = "busy" | "empty" | "queued" | "failed";
 
 export interface PromptInboxPollOptions {
   inboxDir: string;
@@ -20,8 +20,10 @@ export interface PromptInboxPollingOptions extends PromptInboxPollOptions {
 
 export interface ClaimedPromptInboxFile {
   path: string;
+  originalPath: string;
   prompt: string;
   ack: () => Promise<void>;
+  fail: () => Promise<void>;
 }
 
 interface PromptInboxCandidate {
@@ -66,9 +68,17 @@ export async function pollPromptInboxOnce(options: PromptInboxPollOptions): Prom
     return "empty";
   }
 
-  const accepted = await options.handlePrompt(options.target, claimed.prompt);
+  let accepted: boolean;
+  try {
+    accepted = await options.handlePrompt(options.target, claimed.prompt);
+  } catch (error) {
+    await claimed.fail();
+    throw error;
+  }
+
   if (!accepted) {
-    return "busy";
+    await claimed.fail();
+    return "failed";
   }
 
   await claimed.ack();
@@ -79,18 +89,42 @@ export async function claimNextPromptInboxFile(inboxDir: string): Promise<Claime
   const candidates = await listPromptInboxCandidates(inboxDir);
 
   for (const candidate of candidates) {
-    const contents = await readFile(candidate.path, "utf8");
+    const processingPath = `${candidate.path}.processing`;
+    if (await pathExists(processingPath)) {
+      continue;
+    }
+
+    try {
+      await rename(candidate.path, processingPath);
+    } catch (error) {
+      if (isMissingDirectoryError(error)) {
+        continue;
+      }
+      throw error;
+    }
+
+    const contents = await readFile(processingPath, "utf8");
     const prompt = contents.trim();
     if (!prompt) {
-      await rm(candidate.path, { force: true });
+      await rm(processingPath, { force: true });
       continue;
     }
 
     return {
-      path: candidate.path,
+      path: processingPath,
+      originalPath: candidate.path,
       prompt,
       ack: async () => {
-        await rm(candidate.path, { force: true });
+        await rm(processingPath, { force: true });
+      },
+      fail: async () => {
+        const failedPath = `${candidate.path}.failed`;
+        await rm(failedPath, { force: true });
+        await rename(processingPath, failedPath).catch((error) => {
+          if (!isMissingDirectoryError(error)) {
+            throw error;
+          }
+        });
       },
     };
   }
@@ -127,6 +161,18 @@ async function listPromptInboxCandidates(inboxDir: string): Promise<PromptInboxC
   return candidates.sort((left, right) =>
     left.modifiedMs - right.modifiedMs || left.name.localeCompare(right.name),
   );
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await stat(filePath);
+    return true;
+  } catch (error) {
+    if (isMissingDirectoryError(error)) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function isMissingDirectoryError(error: unknown): boolean {

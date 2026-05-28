@@ -11,6 +11,120 @@ function createExtensionDialogs() {
 }
 
 describe("prompt handler", () => {
+  it("waits for completion when requested", async () => {
+    let releasePrompt!: () => void;
+    let promptStarted!: () => void;
+    const promptStartedPromise = new Promise<void>((resolve) => {
+      promptStarted = resolve;
+    });
+    const promptReleasePromise = new Promise<void>((resolve) => {
+      releasePrompt = resolve;
+    });
+    let callbacks: any;
+
+    const fakePiSession = {
+      bindExtensions: vi.fn().mockResolvedValue(undefined),
+      subscribe(nextCallbacks: any) {
+        callbacks = nextCallbacks;
+        return vi.fn();
+      },
+      prompt: vi.fn(async () => {
+        promptStarted();
+        await promptReleasePromise;
+        callbacks.onAgentEnd();
+      }),
+    };
+
+    const handler = createPromptHandler({
+      bot: {
+        api: {
+          sendChatAction: vi.fn().mockResolvedValue(undefined),
+          sendMessage: vi.fn().mockResolvedValue({ message_id: 1 }),
+          editMessageText: vi.fn().mockResolvedValue(undefined),
+          editMessageReplyMarkup: vi.fn().mockResolvedValue(undefined),
+        },
+      } as any,
+      toolVerbosity: "summary",
+      editDebounceMs: 0,
+      typingIntervalMs: 60000,
+      isBusy: () => false,
+      taskRunner: {
+        tryStartPrompt(_target, _promptText, task) {
+          void task();
+          return "started";
+        },
+      },
+      ensureActiveSession: vi.fn().mockResolvedValue(fakePiSession),
+      syncChatScopedCommands: vi.fn(),
+      refreshChatScopedCommands: vi.fn(),
+      extensionDialogs: createExtensionDialogs(),
+      sendBusyReply: vi.fn(),
+    });
+
+    let settled = false;
+    const resultPromise = (handler as any)(
+      {} as any,
+      { chatId: 123 },
+      "wait for me",
+      undefined,
+      undefined,
+      { waitForCompletion: true },
+    ).then((result: boolean) => {
+      settled = true;
+      return result;
+    });
+
+    await promptStartedPromise;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    releasePrompt();
+    await expect(resultPromise).resolves.toBe(true);
+  });
+
+  it("reports waited prompt failures", async () => {
+    const fakePiSession = {
+      bindExtensions: vi.fn().mockResolvedValue(undefined),
+      subscribe: vi.fn().mockReturnValue(vi.fn()),
+      prompt: vi.fn().mockRejectedValue(new Error("boom")),
+    };
+
+    const handler = createPromptHandler({
+      bot: {
+        api: {
+          sendChatAction: vi.fn().mockResolvedValue(undefined),
+          sendMessage: vi.fn().mockResolvedValue({ message_id: 1 }),
+          editMessageText: vi.fn().mockResolvedValue(undefined),
+          editMessageReplyMarkup: vi.fn().mockResolvedValue(undefined),
+        },
+      } as any,
+      toolVerbosity: "summary",
+      editDebounceMs: 0,
+      typingIntervalMs: 60000,
+      isBusy: () => false,
+      taskRunner: {
+        tryStartPrompt(_target, _promptText, task) {
+          void task();
+          return "started";
+        },
+      },
+      ensureActiveSession: vi.fn().mockResolvedValue(fakePiSession),
+      syncChatScopedCommands: vi.fn(),
+      refreshChatScopedCommands: vi.fn(),
+      extensionDialogs: createExtensionDialogs(),
+      sendBusyReply: vi.fn(),
+    });
+
+    await expect((handler as any)(
+      {} as any,
+      { chatId: 123 },
+      "fail",
+      undefined,
+      undefined,
+      { waitForCompletion: true },
+    )).resolves.toBe(false);
+  });
+
   it("sends typing before session activation finishes", async () => {
     let releaseEnsureActiveSession!: () => void;
     const ensureStarted = new Promise<void>((resolve) => {
