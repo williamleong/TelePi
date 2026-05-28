@@ -19,4 +19,10 @@ describe("package metadata", () => {
     expect(ciWorkflow).toContain("node-version: 22.19");
     expect(dockerfile).toContain("FROM node:22.19-alpine");
   });
+
+  it("includes the Linux systemd template in GitHub release artifacts", () => {
+    const packageScript = readFileSync(path.join(repoRoot, "scripts", "package-release.mjs"), "utf8");
+
+    expect(packageScript).toContain('"systemd/telepi.service"');
+  });
 });

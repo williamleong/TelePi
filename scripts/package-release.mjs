@@ -36,6 +36,7 @@ const releaseFiles = [
   "dist",
   "extensions/telepi-handoff.ts",
   "launchd/com.telepi.plist",
+  "systemd/telepi.service",
 ];
 
 const { devDependencies: _devDependencies, ...releasePackageJsonBase } = packageJson;
