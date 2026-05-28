@@ -1,6 +1,9 @@
+import { rmSync } from "node:fs";
+
 import { InlineKeyboard } from "grammy";
 
 import {
+  downloadTelegramFile,
   getTelegramTarget,
   safeEditMessage,
   safeReply,
@@ -82,6 +85,35 @@ describe("bot telegram transport helpers", () => {
       message_thread_id: 456,
       reply_markup: undefined,
     });
+  });
+
+  it("rejects Telegram downloads that exceed the byte limit while streaming", async () => {
+    const api = {
+      getFile: vi.fn().mockResolvedValue({
+        file_path: "photos/large.jpg",
+      }),
+    };
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn().mockResolvedValue(new Response("12345", { status: 200 }));
+    globalThis.fetch = fetchMock;
+    let downloadedPath: string | undefined;
+
+    try {
+      await expect(
+        downloadTelegramFile(api as any, "bot-token", "file-id", {
+          fileKind: "image file",
+          maxFileSizeBytes: 4,
+        }).then((filePath) => {
+          downloadedPath = filePath;
+          return filePath;
+        }),
+      ).rejects.toThrow("image file too large");
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (downloadedPath) {
+        rmSync(downloadedPath, { force: true });
+      }
+    }
   });
 
   it("ignores not-modified edits and falls back to plain text on parse errors", async () => {
