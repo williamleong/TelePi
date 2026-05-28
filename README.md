@@ -14,7 +14,7 @@ Early open-source release: **80+ stars, 13 forks, and hundreds of npm downloads*
 
 You need:
 
-- **Node.js 20+**
+- **Node.js 22.19+**
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 - Your numeric Telegram user ID for the allowlist
 - Pi installed and authenticated locally (`~/.pi/agent/auth.json` exists after a working Pi login)
@@ -670,6 +670,6 @@ Notes:
 - prerelease tags like `v0.2.0-beta.1` are published to npm with the `next` dist-tag and marked as GitHub prereleases
 - npm publishing uses Trusted Publishing from GitHub Actions; no `NPM_TOKEN` secret is required
 - the trusted publisher must be configured on npm for repo `benedict2310/TelePi` and workflow `.github/workflows/release.yml`
-- npm Trusted Publishing currently requires npm CLI `11.5.1+` and Node `22.14.0+`; TelePi keeps the runner's bundled npm unchanged and uses `npx --yes npm@11.10.0` for release steps because older npm versions can fail with misleading `E404 Not Found` publish errors even when OIDC is configured correctly
+- npm Trusted Publishing currently requires npm CLI `11.5.1+`; TelePi runs release jobs on Node `22.19+`, keeps the runner's bundled npm unchanged, and uses `npx --yes npm@11.10.0` for release steps because older npm versions can fail with misleading `E404 Not Found` publish errors even when OIDC is configured correctly
 - the workflow has been verified end-to-end with release `v0.2.2`
 - reusable setup details for this pattern live in `docs/npm-trusted-publishing.md`
