@@ -50,6 +50,7 @@ interface CreatePromptHandlerOptions {
   syncChatScopedCommands: (target: PiSessionContext, slashCommands: SlashCommandInfo[]) => Promise<void>;
   refreshChatScopedCommands: (target: PiSessionContext, piSession: PiSessionService) => Promise<void>;
   extensionDialogs: Pick<ExtensionDialogManager, "openSelect" | "openConfirm" | "openInput">;
+  trackCallbackMessage?: (target: PiSessionContext, messageId: number) => void;
   sendBusyReply: (ctx: Context) => Promise<void>;
 }
 
@@ -79,6 +80,7 @@ async function runPromptFlow(
     syncChatScopedCommands,
     refreshChatScopedCommands,
     extensionDialogs,
+    trackCallbackMessage,
   } = deps;
 
   const abortKeyboard = new InlineKeyboard().text("⏹ Abort", "pi_abort");
@@ -154,6 +156,7 @@ async function runPromptFlow(
         fallbackText,
         replyMarkup: abortKeyboard,
       });
+      trackCallbackMessage?.(target, message.message_id);
       responseMessageId = message.message_id;
       lastRenderedText = workingText;
       lastEditAt = Date.now();
@@ -186,6 +189,7 @@ async function runPromptFlow(
         fallbackText: preview.fallbackText,
         replyMarkup: abortKeyboard,
       });
+      trackCallbackMessage?.(target, message.message_id);
       responseMessageId = message.message_id;
       lastRenderedText = preview.text;
       lastEditAt = Date.now();

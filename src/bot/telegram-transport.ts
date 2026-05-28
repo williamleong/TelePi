@@ -17,6 +17,7 @@ export type TextOptions = {
   parseMode?: TelegramParseMode;
   fallbackText?: string;
   replyMarkup?: InlineKeyboard;
+  onSentMessage?: (message: { message_id: number }) => void;
 };
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MB
@@ -56,6 +57,7 @@ export async function safeReply(
       parseMode,
       fallbackText: fallbackChunks[index] ?? chunk,
       replyMarkup: index === 0 ? options.replyMarkup : undefined,
+      onSentMessage: index === 0 ? options.onSentMessage : undefined,
     });
   }
 }
@@ -71,17 +73,21 @@ export async function sendTextMessage(
     : "HTML";
 
   try {
-    return await api.sendMessage(target.chatId, text, {
+    const message = await api.sendMessage(target.chatId, text, {
       ...(parseMode ? { parse_mode: parseMode } : {}),
       ...(target.messageThreadId !== undefined ? { message_thread_id: target.messageThreadId } : {}),
       reply_markup: options.replyMarkup,
     });
+    options.onSentMessage?.(message);
+    return message;
   } catch (error) {
     if (parseMode && options.fallbackText !== undefined && isTelegramParseError(error)) {
-      return await api.sendMessage(target.chatId, options.fallbackText, {
+      const message = await api.sendMessage(target.chatId, options.fallbackText, {
         ...(target.messageThreadId !== undefined ? { message_thread_id: target.messageThreadId } : {}),
         reply_markup: options.replyMarkup,
       });
+      options.onSentMessage?.(message);
+      return message;
     }
     throw error;
   }

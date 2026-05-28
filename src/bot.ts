@@ -34,11 +34,12 @@ import {
 } from "./bot/slash-command.js";
 import {
   downloadTelegramFile,
-  getTelegramTarget,
-  safeEditMessage,
-  safeReply,
+  getTelegramTarget as getRawTelegramTarget,
+  safeEditMessage as sendSafeEditMessage,
+  safeReply as sendSafeReply,
   sendChatAction,
-  sendTextMessage,
+  sendTextMessage as sendTelegramTextMessage,
+  type TextOptions,
 } from "./bot/telegram-transport.js";
 import { createExtensionDialogManager } from "./bot/extension-dialogs.js";
 import { createBotChatState } from "./bot/chat-state.js";
@@ -72,6 +73,7 @@ const EDIT_DEBOUNCE_MS = 1500;
 const TYPING_INTERVAL_MS = 4500;
 const EXTENSION_UI_TIMEOUT_MS = 60_000;
 const DEFAULT_IMAGE_PROMPT = "Please analyze this image.";
+const CALLBACK_MESSAGE_CONTEXT_LIMIT = 1000;
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   ".jpg": "image/jpeg",
@@ -137,9 +139,109 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   const pendingCommandMenus = new Map<ContextKey, Map<string, { commandText: string }>>();
   const surfacedStartupErrorSignatures = new Map<ContextKey, string>();
   const chatScopedCommandSignatures = new Map<TelegramChatId, string>();
+  const callbackMessageContexts = new Map<string, PiSessionContext>();
   let nextCommandMenuToken = 0;
 
   const getContextKey = (target: PiSessionContext): ContextKey => getPiSessionContextKey(target);
+
+  const cloneTarget = (target: PiSessionContext): PiSessionContext =>
+    target.messageThreadId !== undefined
+      ? { chatId: target.chatId, messageThreadId: target.messageThreadId }
+      : { chatId: target.chatId };
+
+  const getCallbackMessageContextKey = (chatId: TelegramChatId, messageId: number): string =>
+    `${String(chatId)}::${messageId}`;
+
+  const registerCallbackMessageContext = (target: PiSessionContext, messageId: number | undefined): void => {
+    if (messageId === undefined) {
+      return;
+    }
+
+    const key = getCallbackMessageContextKey(target.chatId, messageId);
+    callbackMessageContexts.delete(key);
+    callbackMessageContexts.set(key, cloneTarget(target));
+
+    while (callbackMessageContexts.size > CALLBACK_MESSAGE_CONTEXT_LIMIT) {
+      const oldestKey = callbackMessageContexts.keys().next().value;
+      if (oldestKey === undefined) {
+        break;
+      }
+      callbackMessageContexts.delete(oldestKey);
+    }
+  };
+
+  const getTrackedCallbackTarget = (ctx: Context): PiSessionContext | undefined => {
+    const message = ctx.callbackQuery?.message;
+    const messageId = message?.message_id;
+    const chatId = message?.chat.id ?? ctx.chat?.id;
+    if (messageId === undefined || chatId === undefined || chatId === null) {
+      return undefined;
+    }
+
+    return callbackMessageContexts.get(getCallbackMessageContextKey(chatId, messageId));
+  };
+
+  const getTelegramTarget = (ctx: Context): PiSessionContext | undefined => {
+    const target = getRawTelegramTarget(ctx);
+    const callbackMessageId = ctx.callbackQuery?.message?.message_id;
+    if (target?.messageThreadId !== undefined) {
+      registerCallbackMessageContext(target, callbackMessageId);
+      return target;
+    }
+
+    const trackedTarget = getTrackedCallbackTarget(ctx);
+    return trackedTarget ? cloneTarget(trackedTarget) : target;
+  };
+
+  const withCallbackMessageTracking = (target: PiSessionContext, options: TextOptions = {}): TextOptions => {
+    if (!options.replyMarkup) {
+      return options;
+    }
+
+    const onSentMessage = options.onSentMessage;
+    return {
+      ...options,
+      onSentMessage: (message) => {
+        onSentMessage?.(message);
+        registerCallbackMessageContext(target, message.message_id);
+      },
+    };
+  };
+
+  const sendTextMessage = (
+    api: Context["api"],
+    target: PiSessionContext,
+    text: string,
+    options?: TextOptions,
+  ): Promise<{ message_id: number }> =>
+    sendTelegramTextMessage(api, target, text, withCallbackMessageTracking(target, options));
+
+  const safeReply = async (
+    ctx: Context,
+    text: string,
+    options: TextOptions = {},
+    target = getTelegramTarget(ctx),
+  ): Promise<void> => {
+    if (!target) {
+      return;
+    }
+
+    await sendSafeReply(ctx, text, withCallbackMessageTracking(target, options), target);
+  };
+
+  const safeEditMessage = async (
+    botInstance: Bot<Context>,
+    target: PiSessionContext,
+    messageId: number,
+    text: string,
+    options: TextOptions = {},
+  ): Promise<void> => {
+    await sendSafeEditMessage(botInstance, target, messageId, text, options);
+    if (options.replyMarkup) {
+      registerCallbackMessageContext(target, messageId);
+    }
+  };
+
   const getExistingSession = (target: PiSessionContext): PiSessionService | undefined => sessionRegistry.get(target);
   const getOrCreateSession = async (target: PiSessionContext): Promise<PiSessionService> =>
     sessionRegistry.getOrCreate(target);
@@ -403,6 +505,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
       try {
         const keyboard = buildKeyboard(buttons, page, prefix, extraButtonsMap?.get(contextKey) ?? []);
         await bot.api.editMessageReplyMarkup(target.chatId, messageId, { reply_markup: keyboard });
+        registerCallbackMessageContext(target, messageId);
       } catch (error) {
         if (!isMessageNotModifiedError(error)) {
           console.error(`Failed to update ${prefix} keyboard page`, error);
@@ -451,6 +554,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     syncChatScopedCommands,
     refreshChatScopedCommands,
     extensionDialogs,
+    trackCallbackMessage: registerCallbackMessageContext,
     sendBusyReply,
   });
 

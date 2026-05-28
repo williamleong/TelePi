@@ -1045,6 +1045,56 @@ describe("createBot", () => {
     expect(registry.getSession(ALLOWED_CHAT_ID, 910)).toBeUndefined();
   });
 
+  it("recovers the topic for abort-button callbacks when Telegram omits the thread id", async () => {
+    let resolvePrompt!: () => void;
+    const topicKey = makeContextKey(ALLOWED_CHAT_ID, 101);
+    const { bot, api, registry } = setupBot({
+      perContextSessionOverrides: {
+        [topicKey]: {
+          prompt: vi.fn().mockImplementation(
+            () =>
+              new Promise<void>((resolve) => {
+                resolvePrompt = resolve;
+              }),
+          ),
+        },
+      },
+    });
+
+    await bot.handleUpdate(
+      createTestUpdate({
+        message: {
+          text: "long topic prompt",
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+          message_thread_id: 101,
+        },
+      }),
+    );
+    for (let i = 0; i < 5; i += 1) {
+      await nextTick();
+    }
+
+    const abortButton = findSentReplyMarkupButton(api, (data) => data === "pi_abort");
+    expect(abortButton).toBeTruthy();
+
+    await bot.handleUpdate(
+      createCallbackUpdate("pi_abort", {
+        callback_query: {
+          message: {
+            message_id: abortButton!.messageId,
+            chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+          },
+        },
+      }),
+    );
+
+    expect(registry.getSession(ALLOWED_CHAT_ID, 101)?.service.abort).toHaveBeenCalledTimes(1);
+    expect(registry.getSession(ALLOWED_CHAT_ID)?.service.abort).not.toHaveBeenCalled();
+
+    resolvePrompt();
+    await nextTick();
+  });
+
   it("shows a compact session picker with inline switch buttons", async () => {
     const { bot, api } = setupBot();
 
@@ -1201,6 +1251,57 @@ describe("createBot", () => {
     );
 
     expect(api.sendChatAction).toHaveBeenCalledWith(ALLOWED_CHAT_ID, "typing", 101);
+  });
+
+  it("recovers the topic for session picker callbacks when Telegram omits the thread id", async () => {
+    const topicKey = makeContextKey(ALLOWED_CHAT_ID, 101);
+    const { bot, api, registry } = setupBot({
+      perContextSessionOverrides: {
+        [topicKey]: {
+          listAllSessions: vi.fn().mockResolvedValue([
+            {
+              id: "topic-1",
+              firstMessage: "Topic one",
+              path: "/topic-one.jsonl",
+              messageCount: 2,
+              cwd: "/workspace/topic-one",
+              modified: new Date("2025-01-02T00:00:00.000Z"),
+              name: undefined,
+            },
+          ]),
+        },
+      },
+    });
+
+    await bot.handleUpdate(
+      createTestUpdate({
+        message: {
+          text: "/sessions",
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+          message_thread_id: 101,
+        },
+      }),
+    );
+
+    const switchButton = findSentReplyMarkupButton(api, (data) => data === "switch_0");
+    expect(switchButton).toBeTruthy();
+
+    await bot.handleUpdate(
+      createCallbackUpdate("switch_0", {
+        callback_query: {
+          message: {
+            message_id: switchButton!.messageId,
+            chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+          },
+        },
+      }),
+    );
+
+    expect(registry.getSession(ALLOWED_CHAT_ID, 101)?.service.switchSession).toHaveBeenCalledWith(
+      "/topic-one.jsonl",
+      "/workspace/topic-one",
+    );
+    expect(registry.getSession(ALLOWED_CHAT_ID)?.service.switchSession).not.toHaveBeenCalled();
   });
 
   it("allows independent topics to process prompts concurrently", async () => {
@@ -2494,6 +2595,60 @@ describe("createBot", () => {
     await bot.handleUpdate(createCallbackUpdate(compactButton!.callback_data));
 
     expect(pi.service.prompt).toHaveBeenCalledWith("/compact");
+  });
+
+  it("recovers the topic for /commands picker callbacks when Telegram omits the thread id", async () => {
+    const topicKey = makeContextKey(ALLOWED_CHAT_ID, 101);
+    const { bot, api, registry } = setupBot({
+      perContextSessionOverrides: {
+        [topicKey]: {
+          listSlashCommands: vi.fn().mockResolvedValue([
+            { name: "compact", description: "Compact context", source: "extension", path: "/ext/compact.ts" },
+          ]),
+        },
+      },
+    });
+
+    await bot.handleUpdate(
+      createTestUpdate({
+        message: {
+          text: "/commands",
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+          message_thread_id: 101,
+        },
+      }),
+    );
+
+    const piFilterButton = findSentReplyMarkupButton(api, (data) => data === "cmd_filter_pi");
+    expect(piFilterButton).toBeTruthy();
+
+    await bot.handleUpdate(
+      createCallbackUpdate("cmd_filter_pi", {
+        callback_query: {
+          message: {
+            message_id: piFilterButton!.messageId,
+            chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+          },
+        },
+      }),
+    );
+
+    const compactButton = getEditedReplyMarkupButtons(api, 0).find((button) => button.text.includes("/compact"));
+    expect(compactButton).toBeDefined();
+
+    await bot.handleUpdate(
+      createCallbackUpdate(compactButton!.callback_data, {
+        callback_query: {
+          message: {
+            message_id: piFilterButton!.messageId,
+            chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+          },
+        },
+      }),
+    );
+
+    expect(registry.getSession(ALLOWED_CHAT_ID, 101)?.service.prompt).toHaveBeenCalledWith("/compact");
+    expect(registry.getSession(ALLOWED_CHAT_ID)?.service.prompt).not.toHaveBeenCalled();
   });
 
   it("shows prompt argument hints in /commands without changing Pi command dispatch", async () => {
