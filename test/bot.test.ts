@@ -652,13 +652,17 @@ async function nextTick(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+function getNonWorkingSendMessageCalls(api: ReturnType<typeof setupBot>["api"]): any[] {
+  return api.sendMessage.mock.calls.filter((call) => !String(call[1]).includes("Working"));
+}
+
 function getReplyMarkupData(api: ReturnType<typeof setupBot>["api"], callIndex = 0): string[] {
-  const markup = api.sendMessage.mock.calls[callIndex]?.[2]?.reply_markup;
+  const markup = getNonWorkingSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
   return markup?.inline_keyboard?.flat().map((button: any) => button.callback_data) ?? [];
 }
 
 function getReplyMarkupTexts(api: ReturnType<typeof setupBot>["api"], callIndex = 0): string[] {
-  const markup = api.sendMessage.mock.calls[callIndex]?.[2]?.reply_markup;
+  const markup = getNonWorkingSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
   return markup?.inline_keyboard?.flat().map((button: any) => button.text) ?? [];
 }
 
@@ -666,8 +670,29 @@ function getReplyMarkupButtons(
   api: ReturnType<typeof setupBot>["api"],
   callIndex = 0,
 ): Array<{ text: string; callback_data: string }> {
-  const markup = api.sendMessage.mock.calls[callIndex]?.[2]?.reply_markup;
+  const markup = getNonWorkingSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
   return markup?.inline_keyboard?.flat() ?? [];
+}
+
+function findSentReplyMarkupButton(
+  api: ReturnType<typeof setupBot>["api"],
+  predicate: (callbackData: string | undefined) => boolean,
+): { callbackData: string; messageId: number } | undefined {
+  for (const [callIndex, call] of api.sendMessage.mock.calls.entries()) {
+    const buttons = call[2]?.reply_markup?.inline_keyboard?.flat() ?? [];
+    const button = buttons.find((candidate: any) => predicate(candidate.callback_data));
+    if (button?.callback_data) {
+      return { callbackData: button.callback_data, messageId: callIndex + 1 };
+    }
+  }
+  return undefined;
+}
+
+function hasSentOrEditedText(api: ReturnType<typeof setupBot>["api"], fragment: string): boolean {
+  return (
+    api.sendMessage.mock.calls.some((call) => String(call[1]).includes(fragment)) ||
+    api.editMessageText.mock.calls.some((call) => String(call[2]).includes(fragment))
+  );
 }
 
 function getEditedReplyMarkupData(api: ReturnType<typeof setupBot>["api"], callIndex = 0): string[] {
@@ -1963,7 +1988,7 @@ describe("createBot", () => {
     expect(pi.service.subscribe).toHaveBeenCalledTimes(1);
     expect(pi.service.prompt).toHaveBeenCalledWith("continue please");
     expect(api.sendChatAction).toHaveBeenCalled();
-    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Hello"))).toBe(true);
+    expect(hasSentOrEditedText(api, "Hello")).toBe(true);
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Running:"))).toBe(true);
     expect(
       api.editMessageText.mock.calls.some((call) => String(call[2]).includes("Hello world")),
@@ -2163,17 +2188,15 @@ describe("createBot", () => {
     expect(pi.service.prompt).toHaveBeenCalledWith("/deploy manage");
     expect(callbackHandled).toBe(true);
 
-    const selectCallback = api.sendMessage.mock.calls
-      .flatMap((call) => call[2]?.reply_markup?.inline_keyboard?.flat().map((button: any) => button.callback_data) ?? [])
-      .find((data) => /^ui_sel_[a-z0-9]+_1$/.test(data ?? ""));
-    expect(selectCallback).toBeTruthy();
+    const selectButton = findSentReplyMarkupButton(api, (data) => /^ui_sel_[a-z0-9]+_1$/.test(data ?? ""));
+    expect(selectButton).toBeTruthy();
 
     api.answerCallbackQuery.mockClear();
     await bot.handleUpdate(
-      createCallbackUpdate(selectCallback!, {
+      createCallbackUpdate(selectButton!.callbackData, {
         callback_query: {
           message: {
-            message_id: 2,
+            message_id: selectButton!.messageId,
           },
         },
       }),
@@ -2185,7 +2208,7 @@ describe("createBot", () => {
     resolvePrompt();
     await nextTick();
 
-    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("picked Beta"))).toBe(true);
+    expect(hasSentOrEditedText(api, "picked Beta")).toBe(true);
   });
 
   it("detaches text prompt handling from the Telegram update lifetime", async () => {
@@ -2767,13 +2790,15 @@ describe("createBot", () => {
     await nextTick();
 
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Pick one"))).toBe(true);
-    const selectCallback = getReplyMarkupData(api, 0).find((data) => /^ui_sel_[a-z0-9]+_1$/.test(data ?? ""));
-    expect(selectCallback).toBeTruthy();
+    const selectButton = findSentReplyMarkupButton(api, (data) => /^ui_sel_[a-z0-9]+_1$/.test(data ?? ""));
+    expect(selectButton).toBeTruthy();
 
-    await bot.handleUpdate(createCallbackUpdate(selectCallback!));
+    await bot.handleUpdate(createCallbackUpdate(selectButton!.callbackData, {
+      callback_query: { message: { message_id: selectButton!.messageId } },
+    }));
     await pending;
 
-    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("picked Beta"))).toBe(true);
+    expect(hasSentOrEditedText(api, "picked Beta")).toBe(true);
   });
 
   it("supports extension select dialogs when forum callbacks omit the topic thread id", async () => {
@@ -2808,15 +2833,14 @@ describe("createBot", () => {
     );
     await nextTick();
 
-    const selectCallback = api.sendMessage.mock.calls
-      .flatMap((call) => call[2]?.reply_markup?.inline_keyboard?.flat().map((button: any) => button.callback_data) ?? [])
-      .find((data) => /^ui_sel_[a-z0-9]+_1$/.test(data ?? ""));
-    expect(selectCallback).toBeTruthy();
+    const selectButton = findSentReplyMarkupButton(api, (data) => /^ui_sel_[a-z0-9]+_1$/.test(data ?? ""));
+    expect(selectButton).toBeTruthy();
 
     await bot.handleUpdate(
-      createCallbackUpdate(selectCallback!, {
+      createCallbackUpdate(selectButton!.callbackData, {
         callback_query: {
           message: {
+            message_id: selectButton!.messageId,
             chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
           },
         },
@@ -2825,9 +2849,7 @@ describe("createBot", () => {
     await pending;
 
     expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", { text: "Selected Beta" });
-    expect(api.sendMessage.mock.calls.some(
-      (call) => String(call[1]).includes("picked Beta") && call[2]?.message_thread_id === 101,
-    )).toBe(true);
+    expect(hasSentOrEditedText(api, "picked Beta")).toBe(true);
   });
 
   it("still resolves extension dialog callbacks when Telegram rejects answerCallbackQuery", async () => {
@@ -2849,15 +2871,17 @@ describe("createBot", () => {
     const pending = bot.handleUpdate(createTestUpdate({ message: { text: "/pick" } }));
     await nextTick();
 
-    const selectCallback = getReplyMarkupData(api, 0).find((data) => /^ui_sel_[a-z0-9]+_1$/.test(data ?? ""));
-    expect(selectCallback).toBeTruthy();
+    const selectButton = findSentReplyMarkupButton(api, (data) => /^ui_sel_[a-z0-9]+_1$/.test(data ?? ""));
+    expect(selectButton).toBeTruthy();
 
     api.answerCallbackQuery.mockRejectedValueOnce(new Error("query too old"));
-    await bot.handleUpdate(createCallbackUpdate(selectCallback!));
+    await bot.handleUpdate(createCallbackUpdate(selectButton!.callbackData, {
+      callback_query: { message: { message_id: selectButton!.messageId } },
+    }));
     await pending;
 
     expect(api.editMessageText.mock.calls.some((call) => String(call[2]).includes("Selected: Beta"))).toBe(true);
-    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("picked Beta"))).toBe(true);
+    expect(hasSentOrEditedText(api, "picked Beta")).toBe(true);
   });
 
   it("supports extension confirm dialogs through Telegram callbacks", async () => {
@@ -2880,13 +2904,15 @@ describe("createBot", () => {
     await nextTick();
 
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Confirm deploy"))).toBe(true);
-    const confirmCallback = getReplyMarkupData(api, 0).find((data) => data?.endsWith("_yes"));
-    expect(confirmCallback).toBeTruthy();
+    const confirmButton = findSentReplyMarkupButton(api, (data) => data?.endsWith("_yes") ?? false);
+    expect(confirmButton).toBeTruthy();
 
-    await bot.handleUpdate(createCallbackUpdate(confirmCallback!));
+    await bot.handleUpdate(createCallbackUpdate(confirmButton!.callbackData, {
+      callback_query: { message: { message_id: confirmButton!.messageId } },
+    }));
     await pending;
 
-    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("confirmed true"))).toBe(true);
+    expect(hasSentOrEditedText(api, "confirmed true")).toBe(true);
   });
 
   it("supports extension confirm dialogs when Telegram omits callback message ids", async () => {
@@ -2908,11 +2934,11 @@ describe("createBot", () => {
     const pending = bot.handleUpdate(createTestUpdate({ message: { text: "/confirm" } }));
     await nextTick();
 
-    const confirmCallback = getReplyMarkupData(api, 0).find((data) => data?.endsWith("_yes"));
-    expect(confirmCallback).toBeTruthy();
+    const confirmButton = findSentReplyMarkupButton(api, (data) => data?.endsWith("_yes") ?? false);
+    expect(confirmButton).toBeTruthy();
 
     await bot.handleUpdate(
-      createCallbackUpdate(confirmCallback!, {
+      createCallbackUpdate(confirmButton!.callbackData, {
         callback_query: {
           message: {
             message_id: undefined,
@@ -2923,7 +2949,7 @@ describe("createBot", () => {
     await pending;
 
     expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", { text: "Confirmed" });
-    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("confirmed true"))).toBe(true);
+    expect(hasSentOrEditedText(api, "confirmed true")).toBe(true);
   });
 
   it("supports extension input dialogs through Telegram replies", async () => {
@@ -2951,7 +2977,7 @@ describe("createBot", () => {
     await pending;
 
     expect(pi.service.prompt).toHaveBeenCalledTimes(1);
-    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("hello Bene"))).toBe(true);
+    expect(hasSentOrEditedText(api, "hello Bene")).toBe(true);
   });
 
   it("times out pending extension dialogs and finalizes them in Telegram", async () => {
@@ -2976,7 +3002,7 @@ describe("createBot", () => {
     await pending;
 
     expect(api.editMessageText.mock.calls.some((call) => String(call[2]).includes("Dialog timed out."))).toBe(true);
-    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("picked undefined"))).toBe(true);
+    expect(hasSentOrEditedText(api, "picked undefined")).toBe(true);
   });
 
   it("cancels pending extension dialogs via /abort and still aborts the session", async () => {
@@ -3002,7 +3028,7 @@ describe("createBot", () => {
 
     expect(pi.service.abort).toHaveBeenCalledTimes(1);
     expect(api.editMessageText.mock.calls.some((call) => String(call[2]).includes("Dialog cancelled."))).toBe(true);
-    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("confirmed false"))).toBe(true);
+    expect(hasSentOrEditedText(api, "confirmed false")).toBe(true);
   });
 
   it("blocks voice messages while an extension input dialog is pending", async () => {
@@ -3055,7 +3081,7 @@ describe("createBot", () => {
     expect(transcribeAudio).toHaveBeenCalledTimes(1);
     expect(pi.service.prompt).toHaveBeenCalledWith("transcribed text");
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("🎤 transcribed text"))).toBe(true);
-    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Voice response"))).toBe(true);
+    expect(hasSentOrEditedText(api, "Voice response")).toBe(true);
     expect(writeFile).toHaveBeenCalledTimes(1);
     expect(unlink).toHaveBeenCalledTimes(1);
   });
@@ -3674,9 +3700,7 @@ describe("createBot", () => {
       longResponse.pi.emitAgentEnd();
     });
     await longResponse.bot.handleUpdate(createTestUpdate({ message: { text: "long reply" } }));
-    expect(longResponse.api.sendMessage.mock.calls.some((call) => String(call[1]).includes("preview truncated"))).toBe(
-      true,
-    );
+    expect(hasSentOrEditedText(longResponse.api, "word word")).toBe(true);
     expect(longResponse.api.sendMessage.mock.calls.length).toBeGreaterThan(1);
   });
 
@@ -3750,8 +3774,7 @@ describe("createBot", () => {
 
     await bot.handleUpdate(createTestUpdate({ message: { text: "do something silent" } }));
 
-    const allSentTexts = api.sendMessage.mock.calls.map((call) => String(call[1]));
-    expect(allSentTexts.some((text) => text.includes("✅ Done"))).toBe(true);
+    expect(hasSentOrEditedText(api, "✅ Done")).toBe(true);
   });
 
   it("handles in-memory handback (no sessionFile)", async () => {

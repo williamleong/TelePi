@@ -81,20 +81,6 @@ async function runPromptFlow(
     extensionDialogs,
   } = deps;
 
-  const piSession = await ensureActiveSession(ctx, target);
-  if (!piSession) {
-    return;
-  }
-
-  const slashCommands = preloadedSlashCommands;
-  if (slashCommands) {
-    void syncChatScopedCommands(target, slashCommands).catch((error) => {
-      console.error("Failed to sync chat-scoped Telegram commands", error);
-    });
-  } else {
-    void refreshChatScopedCommands(target, piSession);
-  }
-
   const abortKeyboard = new InlineKeyboard().text("⏹ Abort", "pi_abort");
   const toolStates = new Map<string, ToolState>();
   const toolCounts = new Map<string, number>();
@@ -107,6 +93,7 @@ async function runPromptFlow(
   let isFlushing = false;
   let flushPending = false;
   let finalized = false;
+  let typingStopped = false;
 
   const typingInterval = setInterval(() => {
     void sendChatAction(bot.api, target, "typing").catch(() => {});
@@ -114,6 +101,10 @@ async function runPromptFlow(
   void sendChatAction(bot.api, target, "typing").catch(() => {});
 
   const stopTyping = (): void => {
+    if (typingStopped) {
+      return;
+    }
+    typingStopped = true;
     clearInterval(typingInterval);
   };
 
@@ -141,6 +132,41 @@ async function runPromptFlow(
     }
 
     return trimmedText ? `${trimmedText}\n\n${summaryLine}` : summaryLine;
+  };
+
+  const ensureWorkingMessage = async (): Promise<void> => {
+    if (responseMessageId) {
+      return;
+    }
+    if (responseMessagePromise) {
+      try {
+        await responseMessagePromise;
+      } catch {
+        // A later text delta or final response can try sending again.
+      }
+      return;
+    }
+
+    const workingText = "<i>⏳ Working…</i>";
+    const fallbackText = "⏳ Working…";
+    responseMessagePromise = (async () => {
+      const message = await sendTextMessage(bot.api, target, workingText, {
+        fallbackText,
+        replyMarkup: abortKeyboard,
+      });
+      responseMessageId = message.message_id;
+      lastRenderedText = workingText;
+      lastEditAt = Date.now();
+      stopTyping();
+    })();
+
+    try {
+      await responseMessagePromise;
+    } catch (error) {
+      console.error("Failed to send Telegram working message", error);
+    } finally {
+      responseMessagePromise = undefined;
+    }
   };
 
   const ensureResponseMessage = async (): Promise<void> => {
@@ -304,6 +330,28 @@ async function runPromptFlow(
     await deliverRenderedChunks(splitMarkdownForTelegram(finalText));
   };
 
+  let piSession: PiSessionService | undefined;
+  try {
+    piSession = await ensureActiveSession(ctx, target);
+  } catch (error) {
+    stopTyping();
+    throw error;
+  }
+  if (!piSession) {
+    stopTyping();
+    return;
+  }
+
+  const slashCommands = preloadedSlashCommands;
+  if (slashCommands) {
+    void syncChatScopedCommands(target, slashCommands).catch((error) => {
+      console.error("Failed to sync chat-scoped Telegram commands", error);
+    });
+  } else {
+    void refreshChatScopedCommands(target, piSession);
+  }
+
+  await ensureWorkingMessage();
   await piSession.bindExtensions({
     commandContextActions: {
       waitForIdle: async () => {
