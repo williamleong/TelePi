@@ -51,9 +51,6 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "^0.75.4",
-    "@earendil-works/pi-ai": "^0.75.4",
-    "@earendil-works/pi-coding-agent": "^0.75.4",
     "@grammyjs/auto-retry": "^2.0.2",
     "grammy": "^1.35.0",
     "minimatch": "^10.2.4"
@@ -63,10 +60,18 @@
     "sherpa-onnx-node": "1.12.32"
   },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.80.3",
+    "@earendil-works/pi-ai": "^0.80.3",
+    "@earendil-works/pi-coding-agent": "^0.80.3",
     "@types/node": "^22.0.0",
     "@vitest/coverage-v8": "^3.2.4",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.2.4"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": ">=0.80.0 <0.81.0",
+    "@earendil-works/pi-ai": ">=0.80.0 <0.81.0",
+    "@earendil-works/pi-coding-agent": ">=0.80.0 <0.81.0"
   }
 }

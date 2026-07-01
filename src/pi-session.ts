@@ -35,6 +35,7 @@ import {
   resolveSessionPathForRuntime,
   resolveWorkspacePathForRuntime,
 } from "./pi-session-paths.js";
+import { assertPiSdkCompatibility } from "./pi-sdk-compatibility.js";
 import { describeEntry, type SessionTreeNodeLike as SessionTreeNode } from "./tree.js";
 
 /**
@@ -472,6 +473,7 @@ async function createPiSessionHandle(
   sessionManager: SessionManager,
   initialSessionStartEvent?: { reason: "new" | "resume" | "fork" },
 ): Promise<PiSessionHandle> {
+  assertPiSdkCompatibility();
   const authStorage = AuthStorage.create();
   let getSlashCommands = (): SlashCommandInfo[] => [];
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({
