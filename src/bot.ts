@@ -75,6 +75,15 @@ const EXTENSION_UI_TIMEOUT_MS = 60_000;
 const DEFAULT_IMAGE_PROMPT = "Please analyze this image.";
 const CALLBACK_MESSAGE_CONTEXT_LIMIT = 1000;
 const THREADLESS_FORUM_CALLBACK_EXPIRED_TEXT = "Expired, run the command again in this topic";
+const TELEGRAM_FORUM_TOPIC_NAME_LIMIT = 128;
+const FORUM_TOPIC_SERVICE_MESSAGE_KEYS = [
+  "forum_topic_created",
+  "forum_topic_edited",
+  "forum_topic_closed",
+  "forum_topic_reopened",
+  "general_forum_topic_hidden",
+  "general_forum_topic_unhidden",
+] as const;
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   ".jpg": "image/jpeg",
@@ -118,6 +127,20 @@ function resolveImageMimeType(filePath: string, explicitMimeType?: string): stri
   const extensionIndex = filePath.lastIndexOf(".");
   const extension = extensionIndex >= 0 ? filePath.slice(extensionIndex).toLowerCase() : "";
   return IMAGE_MIME_BY_EXTENSION[extension] ?? "image/jpeg";
+}
+
+function normalizeForumTopicName(sessionName: string | undefined): string | undefined {
+  const normalized = sessionName?.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return undefined;
+  }
+
+  return normalized.slice(0, TELEGRAM_FORUM_TOPIC_NAME_LIMIT);
+}
+
+function isForumTopicServiceMessage(ctx: Context): boolean {
+  const message = ctx.message as Record<string, unknown> | undefined;
+  return message !== undefined && FORUM_TOPIC_SERVICE_MESSAGE_KEYS.some((key) => key in message);
 }
 
 export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegistry): Bot<Context> {
@@ -263,6 +286,26 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     await sendSafeEditMessage(botInstance, target, messageId, text, options);
     if (options.replyMarkup) {
       registerCallbackMessageContext(target, messageId);
+    }
+  };
+
+  const renameForumTopicToSessionName = async (
+    target: PiSessionContext,
+    info: PiSessionInfo,
+  ): Promise<void> => {
+    if (target.messageThreadId === undefined) {
+      return;
+    }
+
+    const name = normalizeForumTopicName(info.sessionName);
+    if (!name) {
+      return;
+    }
+
+    try {
+      await bot.api.editForumTopic(target.chatId, target.messageThreadId, { name });
+    } catch (error) {
+      console.error("Failed to rename Telegram forum topic:", formatError(error));
     }
   };
 
@@ -539,6 +582,10 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   };
 
   bot.use(async (ctx, next) => {
+    if (isForumTopicServiceMessage(ctx)) {
+      return;
+    }
+
     const fromId = ctx.from?.id;
     if (!fromId || !config.telegramAllowedUserIdSet.has(fromId)) {
       if (ctx.callbackQuery) {
@@ -663,6 +710,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     clearContextPickers,
     clearContextPromptMemory,
     refreshChatScopedCommands,
+    renameForumTopicToSessionName,
     syncChatScopedCommands,
     setChatCommandSignature: (chatId, signature) => {
       if (signature === undefined) {
@@ -1067,6 +1115,8 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
         : "";
       const plainText = `Switched!${workspaceNotePlain}\n\n${renderSessionInfoPlain(info)}`;
       const html = `<b>Switched!</b>${workspaceNoteHTML}\n\n${renderSessionInfoHTML(info)}`;
+
+      await renameForumTopicToSessionName(target, info);
 
       if (messageId) {
         await safeEditMessage(bot, target, messageId, html, { fallbackText: plainText });

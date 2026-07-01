@@ -18,6 +18,7 @@ export function createSessionCommandHandlers(deps: {
   clearContextPickers: (contextKey: string) => void;
   clearContextPromptMemory: (target: PiSessionContext) => void;
   refreshChatScopedCommands: (target: PiSessionContext, piSession: PiSessionService) => Promise<void>;
+  renameForumTopicToSessionName: (target: PiSessionContext, info: PiSessionInfo) => Promise<void>;
   syncChatScopedCommands: (target: PiSessionContext, slashCommands: SlashCommandInfo[]) => Promise<void>;
   setChatCommandSignature: (chatId: number | string, signature?: string) => void;
   removeSession: (target: PiSessionContext) => void;
@@ -39,6 +40,7 @@ export function createSessionCommandHandlers(deps: {
     clearContextPickers,
     clearContextPromptMemory,
     refreshChatScopedCommands,
+    renameForumTopicToSessionName,
     syncChatScopedCommands,
     setChatCommandSignature,
     removeSession,
@@ -91,6 +93,7 @@ export function createSessionCommandHandlers(deps: {
         }
 
         await refreshChatScopedCommands(target, piSession);
+        await renameForumTopicToSessionName(target, info);
         clearContextPickers(contextKey);
         clearContextPromptMemory(target);
         const workspaceNotePlain = resolvedSession.workspaceWarning

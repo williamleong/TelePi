@@ -470,6 +470,7 @@ function setupBot(options: SetupOptions = {}) {
     })),
     editMessageText: vi.fn().mockResolvedValue(true),
     editMessageReplyMarkup: vi.fn().mockResolvedValue(true),
+    editForumTopic: vi.fn().mockResolvedValue(true),
     sendChatAction: vi.fn().mockResolvedValue(true),
     setMyCommands: vi.fn().mockResolvedValue(true),
     answerCallbackQuery: vi.fn().mockResolvedValue(true),
@@ -499,6 +500,11 @@ function setupBot(options: SetupOptions = {}) {
       case "editMessageReplyMarkup":
         await api.editMessageReplyMarkup(payload.chat_id, payload.message_id, {
           reply_markup: payload.reply_markup,
+        });
+        return { ok: true, result: true };
+      case "editForumTopic":
+        await api.editForumTopic(payload.chat_id, payload.message_thread_id, {
+          name: payload.name,
         });
         return { ok: true, result: true };
       case "sendChatAction":
@@ -983,6 +989,25 @@ describe("createBot", () => {
     expect(api.sendMessage.mock.calls[0]?.[1]).toBe("Unauthorized");
   });
 
+  it("ignores Telegram forum-topic service messages instead of replying unauthorized", async () => {
+    const { bot, api } = setupBot();
+
+    await bot.handleUpdate(
+      createTestUpdate({
+        message: {
+          text: undefined,
+          entities: undefined,
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          from: { id: 1, is_bot: true, first_name: "TelePi" },
+          message_thread_id: 777,
+          forum_topic_edited: { name: "Project kickoff" },
+        },
+      }),
+    );
+
+    expect(api.sendMessage).not.toHaveBeenCalled();
+  });
+
   it.each(["/start", "/commands", "/sessions", "/new", "/model"])(
     "surfaces session bootstrap failures for %s",
     async (command) => {
@@ -1456,6 +1481,105 @@ describe("createBot", () => {
     );
     expect(failure.api.sendMessage.mock.calls[0]?.[1]).toContain("Failed:");
     expect(failure.api.sendMessage.mock.calls[0]?.[1]).toContain("ambiguous session id");
+  });
+
+  it("renames forum topics to the session name after direct session switches", async () => {
+    const { bot, api } = setupBot({
+      piSessionOverrides: {
+        switchSession: vi.fn().mockResolvedValue({
+          sessionId: "switched-id",
+          sessionFile: "/tmp/switched.jsonl",
+          workspace: "/workspace/B",
+          model: "anthropic/claude-sonnet-4-5",
+          sessionName: "Project kickoff",
+          cancelled: false,
+        }),
+      },
+    });
+
+    await bot.handleUpdate(
+      createTestUpdate({
+        message: {
+          text: "/sessions /saved/session.jsonl",
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          message_thread_id: 777,
+        },
+      }),
+    );
+
+    expect(api.editForumTopic).toHaveBeenCalledWith(ALLOWED_CHAT_ID, 777, {
+      name: "Project kickoff",
+    });
+  });
+
+  it("renames forum topics to the session name after session picker switches", async () => {
+    const { bot, api } = setupBot({
+      piSessionOverrides: {
+        switchSession: vi.fn().mockResolvedValue({
+          sessionId: "switched-id",
+          sessionFile: "/tmp/switched.jsonl",
+          workspace: "/workspace/B",
+          model: "anthropic/claude-sonnet-4-5",
+          sessionName: "Refactor session",
+          cancelled: false,
+        }),
+      },
+    });
+
+    await bot.handleUpdate(
+      createTestUpdate({
+        message: {
+          text: "/sessions",
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          message_thread_id: 888,
+        },
+      }),
+    );
+    await bot.handleUpdate(
+      createCallbackUpdate("switch_1", {
+        callback_query: {
+          message: {
+            chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+            message_thread_id: 888,
+          },
+        },
+      }),
+    );
+
+    expect(api.editForumTopic).toHaveBeenCalledWith(ALLOWED_CHAT_ID, 888, {
+      name: "Refactor session",
+    });
+  });
+
+  it("continues session switching when Telegram topic rename fails", async () => {
+    const { bot, api } = setupBot({
+      piSessionOverrides: {
+        switchSession: vi.fn().mockResolvedValue({
+          sessionId: "switched-id",
+          sessionFile: "/tmp/switched.jsonl",
+          workspace: "/workspace/B",
+          model: "anthropic/claude-sonnet-4-5",
+          sessionName: "No permission session",
+          cancelled: false,
+        }),
+      },
+    });
+    api.editForumTopic.mockRejectedValueOnce(new Error("not enough rights"));
+
+    await bot.handleUpdate(
+      createTestUpdate({
+        message: {
+          text: "/sessions /saved/session.jsonl",
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          message_thread_id: 999,
+        },
+      }),
+    );
+
+    expect(api.editForumTopic).toHaveBeenCalledWith(ALLOWED_CHAT_ID, 999, {
+      name: "No permission session",
+    });
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("Switched session");
   });
 
   it("handles switch callbacks, expired picks, and wait states", async () => {
