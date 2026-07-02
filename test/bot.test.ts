@@ -1608,6 +1608,38 @@ describe("createBot", () => {
     expect(api.sendMessage.mock.calls[0]?.[1]).toContain("Switched session");
   });
 
+  it("renames forum topics when the session name changes during a prompt", async () => {
+    const topicKey = makeContextKey(ALLOWED_CHAT_ID, 777);
+    let fresh: ReturnType<typeof setupBot>;
+    const prompt = vi.fn().mockImplementation(async () => {
+      const topicPi = fresh.registry.getSession(ALLOWED_CHAT_ID, 777)!;
+      topicPi.getCallbacks()?.onSessionInfoChanged?.("Auto Rename Telepi Thread Titles");
+      topicPi.emitTextDelta("Done");
+      topicPi.emitAgentEnd();
+    });
+    fresh = setupBot({
+      perContextSessionOverrides: {
+        [topicKey]: { prompt } as Partial<PiSessionService>,
+      },
+    });
+
+    await fresh.bot.handleUpdate(
+      createTestUpdate({
+        message: {
+          text: "first prompt",
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          message_thread_id: 777,
+        },
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(fresh.api.editForumTopic).toHaveBeenCalledWith(ALLOWED_CHAT_ID, 777, {
+        name: "Auto Rename Telepi Thread Titles",
+      });
+    });
+  });
+
   it("handles switch callbacks, expired picks, and wait states", async () => {
     const ready = setupBot();
     await ready.bot.handleUpdate(createTestUpdate({ message: { text: "/sessions" } }));

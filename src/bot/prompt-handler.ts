@@ -31,7 +31,7 @@ import { createTelegramUIContext } from "../telegram-ui-context.js";
 import type { ToolVerbosity } from "../config.js";
 import type { ExtensionDialogManager } from "./extension-dialogs.js";
 import type { ChatTaskRunner } from "./chat-task-runner.js";
-import type { PiSessionContext, PiSessionService } from "../pi-session.js";
+import type { PiSessionContext, PiSessionInfo, PiSessionService } from "../pi-session.js";
 
 export interface HandleUserPromptOptions {
   waitForCompletion?: boolean;
@@ -58,6 +58,7 @@ interface CreatePromptHandlerOptions {
   refreshChatScopedCommands: (target: PiSessionContext, piSession: PiSessionService) => Promise<void>;
   extensionDialogs: Pick<ExtensionDialogManager, "openSelect" | "openConfirm" | "openInput">;
   trackCallbackMessage?: (target: PiSessionContext, messageId: number) => void;
+  renameForumTopicToSessionName?: (target: PiSessionContext, info: PiSessionInfo) => Promise<void>;
   sendBusyReply: (ctx: Context) => Promise<void>;
 }
 
@@ -90,6 +91,7 @@ async function runPromptFlow(
     refreshChatScopedCommands,
     extensionDialogs,
     trackCallbackMessage,
+    renameForumTopicToSessionName,
   } = deps;
 
   const abortKeyboard = new InlineKeyboard().text("⏹ Abort", "pi_abort");
@@ -523,6 +525,16 @@ async function runPromptFlow(
     onAgentEnd: () => {
       void finalizeResponse().catch((error) => {
         console.error("Failed to finalize Telegram response message", error);
+      });
+    },
+    onSessionInfoChanged: (sessionName) => {
+      if (!renameForumTopicToSessionName) {
+        return;
+      }
+
+      void renameForumTopicToSessionName(target, {
+        ...piSession.getInfo(),
+        sessionName,
       });
     },
   });

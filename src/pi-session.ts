@@ -56,6 +56,7 @@ export interface PiSessionCallbacks {
   onToolUpdate: (toolCallId: string, partialResult: string) => void;
   onToolEnd: (toolCallId: string, isError: boolean) => void;
   onAgentEnd: () => void;
+  onSessionInfoChanged?: (sessionName: string | undefined) => void;
 }
 
 export interface PiSessionDiagnostic {
@@ -573,6 +574,9 @@ export function subscribeToSession(
         break;
       case "agent_end":
         callbacks.onAgentEnd();
+        break;
+      case "session_info_changed":
+        callbacks.onSessionInfoChanged?.(event.name);
         break;
       default:
         break;

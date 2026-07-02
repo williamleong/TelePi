@@ -1924,6 +1924,7 @@ describe("PiSessionService", () => {
     const onToolUpdate = vi.fn();
     const onToolEnd = vi.fn();
     const onAgentEnd = vi.fn();
+    const onSessionInfoChanged = vi.fn();
 
     const unsubscribe = service.subscribe({
       onTextDelta,
@@ -1931,6 +1932,7 @@ describe("PiSessionService", () => {
       onToolUpdate,
       onToolEnd,
       onAgentEnd,
+      onSessionInfoChanged,
     });
 
     const emit = mockState.getSubscriber(currentSession);
@@ -1938,6 +1940,7 @@ describe("PiSessionService", () => {
     emit?.({ type: "tool_execution_start", toolName: "bash", toolCallId: "tool-1" });
     emit?.({ type: "tool_execution_update", toolCallId: "tool-1", partialResult: { ok: true } });
     emit?.({ type: "tool_execution_end", toolCallId: "tool-1", isError: false });
+    emit?.({ type: "session_info_changed", name: "Auto title" });
     emit?.({ type: "agent_end" });
     unsubscribe();
 
@@ -1945,6 +1948,7 @@ describe("PiSessionService", () => {
     expect(onToolStart).toHaveBeenCalledWith("bash", "tool-1");
     expect(onToolUpdate).toHaveBeenCalledWith("tool-1", '{\n  "ok": true\n}');
     expect(onToolEnd).toHaveBeenCalledWith("tool-1", false);
+    expect(onSessionInfoChanged).toHaveBeenCalledWith("Auto title");
     expect(onAgentEnd).toHaveBeenCalledTimes(1);
   });
 

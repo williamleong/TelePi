@@ -631,6 +631,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     refreshChatScopedCommands,
     extensionDialogs,
     trackCallbackMessage: registerCallbackMessageContext,
+    renameForumTopicToSessionName,
     sendBusyReply,
   });
 
