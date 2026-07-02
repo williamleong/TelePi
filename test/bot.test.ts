@@ -468,6 +468,12 @@ function setupBot(options: SetupOptions = {}) {
       text,
       ...opts,
     })),
+    sendRichMessage: vi.fn().mockImplementation(async (chatId: number | string, richMessage: any, opts?: any) => ({
+      message_id: ++messageId,
+      chat: { id: chatId },
+      rich_message: richMessage,
+      ...opts,
+    })),
     editMessageText: vi.fn().mockResolvedValue(true),
     editMessageReplyMarkup: vi.fn().mockResolvedValue(true),
     editForumTopic: vi.fn().mockResolvedValue(true),
@@ -491,8 +497,16 @@ function setupBot(options: SetupOptions = {}) {
             message_thread_id: payload.message_thread_id,
           }),
         };
+      case "sendRichMessage":
+        return {
+          ok: true,
+          result: await api.sendRichMessage(payload.chat_id, payload.rich_message, {
+            reply_markup: payload.reply_markup,
+            message_thread_id: payload.message_thread_id,
+          }),
+        };
       case "editMessageText":
-        await api.editMessageText(payload.chat_id, payload.message_id, payload.text, {
+        await api.editMessageText(payload.chat_id, payload.message_id, payload.rich_message ?? payload.text, {
           parse_mode: payload.parse_mode,
           reply_markup: payload.reply_markup,
         });
@@ -699,10 +713,22 @@ function findSentReplyMarkupButton(
   return undefined;
 }
 
+function telegramTextPayloadIncludes(payload: unknown, fragment: string): boolean {
+  if (typeof payload === "string") {
+    return payload.includes(fragment);
+  }
+  if (payload && typeof payload === "object") {
+    const richMessage = payload as { markdown?: unknown; html?: unknown };
+    return String(richMessage.markdown ?? richMessage.html ?? "").includes(fragment);
+  }
+  return false;
+}
+
 function hasSentOrEditedText(api: ReturnType<typeof setupBot>["api"], fragment: string): boolean {
   return (
-    api.sendMessage.mock.calls.some((call) => String(call[1]).includes(fragment)) ||
-    api.editMessageText.mock.calls.some((call) => String(call[2]).includes(fragment))
+    api.sendMessage.mock.calls.some((call) => telegramTextPayloadIncludes(call[1], fragment)) ||
+    api.sendRichMessage.mock.calls.some((call) => telegramTextPayloadIncludes(call[1], fragment)) ||
+    api.editMessageText.mock.calls.some((call) => telegramTextPayloadIncludes(call[2], fragment))
   );
 }
 
@@ -2272,6 +2298,29 @@ describe("createBot", () => {
     expect(
       api.editMessageText.mock.calls.some((call) => String(call[2]).includes("Hello world")),
     ).toBe(true);
+  });
+
+  it("finalizes rich Markdown assistant responses through Telegram rich messages", async () => {
+    const { bot, pi, api } = setupBot();
+    const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
+    const richMarkdown = [
+      "# Report",
+      "",
+      "| Metric | Value |",
+      "| ------ | ----- |",
+      "| Speed | **42 ms** |",
+    ].join("\n");
+
+    promptMock.mockImplementation(async () => {
+      pi.emitTextDelta(richMarkdown);
+      pi.emitAgentEnd();
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "make a report" } }));
+
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(true);
+    expect(api.editMessageText.mock.calls.some((call) => call[2]?.markdown?.includes("# Report"))).toBe(true);
+    expect(api.editMessageText.mock.calls.some((call) => call[2]?.markdown?.includes("| Metric | Value |"))).toBe(true);
   });
 
   it("bridges discovered Pi slash commands into the prompt flow", async () => {

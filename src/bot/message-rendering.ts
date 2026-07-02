@@ -3,11 +3,13 @@ import { escapeHTML, formatTelegramHTML } from "../format.js";
 import type { PiSessionDiagnostic, PiSessionInfo } from "../pi-session.js";
 
 export type TelegramParseMode = "HTML";
+export type TelegramDelivery = "rich-markdown";
 
 export type RenderedText = {
   text: string;
   fallbackText: string;
   parseMode?: TelegramParseMode;
+  delivery?: TelegramDelivery;
 };
 
 export type RenderedChunk = RenderedText & {
@@ -15,6 +17,7 @@ export type RenderedChunk = RenderedText & {
 };
 
 export const TELEGRAM_MESSAGE_LIMIT = 4000;
+export const TELEGRAM_RICH_MESSAGE_LIMIT = 32768;
 export const TOOL_OUTPUT_PREVIEW_LIMIT = 500;
 const STREAMING_PREVIEW_LIMIT = 3800;
 const FORMATTED_CHUNK_TARGET = 3000;
@@ -402,6 +405,89 @@ export function formatMarkdownMessage(markdown: string): RenderedText {
       parseMode: undefined,
     };
   }
+}
+
+export function splitRichMarkdownForTelegram(markdown: string): RenderedChunk[] {
+  if (!markdown) {
+    return [];
+  }
+
+  const chunks: RenderedChunk[] = [];
+  let remaining = markdown;
+
+  while (remaining) {
+    const maxLength = Math.min(remaining.length, TELEGRAM_RICH_MESSAGE_LIMIT);
+    const initialCut = findPreferredSplitIndex(remaining, maxLength);
+    const candidate = remaining.slice(0, initialCut) || remaining.slice(0, 1);
+    const rendered = renderRichMarkdownChunkWithinLimit(candidate);
+
+    chunks.push(rendered);
+    remaining = remaining.slice(rendered.sourceText.length).trimStart();
+  }
+
+  return chunks;
+}
+
+export function renderRichMarkdownChunkWithinLimit(markdown: string): RenderedChunk {
+  if (!markdown) {
+    return {
+      text: "",
+      fallbackText: "",
+      sourceText: "",
+      delivery: "rich-markdown",
+    };
+  }
+
+  let sourceText = markdown;
+  let rendered = formatRichMarkdownMessage(sourceText);
+
+  while (rendered.text.length > TELEGRAM_RICH_MESSAGE_LIMIT && sourceText.length > 1) {
+    const nextLength = Math.max(1, sourceText.length - Math.max(100, Math.ceil(sourceText.length * 0.1)));
+    sourceText = sourceText.slice(0, nextLength).trimEnd() || sourceText.slice(0, nextLength);
+    rendered = formatRichMarkdownMessage(sourceText);
+  }
+
+  return {
+    ...rendered,
+    sourceText,
+  };
+}
+
+export function formatRichMarkdownMessage(markdown: string): RenderedText {
+  return {
+    text: sanitizeRichMarkdown(markdown),
+    fallbackText: markdown,
+    delivery: "rich-markdown",
+  };
+}
+
+export function sanitizeRichMarkdown(markdown: string): string {
+  return markdown.replace(
+    /!\[([^\]\n]*)\]\((https?:\/\/[^\s)]+)(?:\s+"[^"]*")?\)/gi,
+    (_match, alt: string, url: string) => `[${alt.trim() || url}](${url})`,
+  );
+}
+
+export function isRichMarkdownCandidate(markdown: string): boolean {
+  return (
+    /^\s{0,3}#{1,6}\s+\S/m.test(markdown) ||
+    hasMarkdownTable(markdown) ||
+    /\[\^[^\]\n]+\]/.test(markdown) ||
+    /^\s*(?:\$\$|```math\b)/m.test(markdown) ||
+    /<\/?(?:details|summary|aside|tg-[a-z-]+)\b/i.test(markdown)
+  );
+}
+
+function hasMarkdownTable(markdown: string): boolean {
+  const lines = markdown.split("\n");
+  return lines.some((line, index) => {
+    if (!line.includes("|") || index + 1 >= lines.length) {
+      return false;
+    }
+
+    const delimiter = lines[index + 1]?.trim() ?? "";
+    return /^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$/.test(delimiter);
+  });
 }
 
 export function findPreferredSplitIndex(text: string, maxLength: number): number {

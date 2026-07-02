@@ -5,6 +5,7 @@ import {
   buildStreamingPreview,
   findPreferredSplitIndex,
   formatMarkdownMessage,
+  formatRichMarkdownMessage,
   formatToolSummaryLine,
   renderDialogPanel,
   renderExtensionError,
@@ -21,12 +22,15 @@ import {
   renderVoiceSupportHTML,
   renderVoiceSupportPlain,
   splitMarkdownForTelegram,
+  splitRichMarkdownForTelegram,
   splitTelegramText,
   stripHtml,
   summarizeToolOutput,
   trimLine,
   isMessageNotModifiedError,
+  isRichMarkdownCandidate,
   isTelegramParseError,
+  TELEGRAM_RICH_MESSAGE_LIMIT,
 } from "../../src/bot/message-rendering.js";
 
 describe("bot message rendering helpers", () => {
@@ -153,6 +157,47 @@ describe("bot message rendering helpers", () => {
       fallbackText: "hello <world>",
       parseMode: undefined,
     });
+  });
+
+  it("formats rich Markdown chunks without HTML conversion and neutralizes external media embeds", () => {
+    const markdown = [
+      "# Report",
+      "",
+      "| Metric | Value |",
+      "| ------ | ----- |",
+      "| Speed | **42 ms** |",
+      "",
+      "![chart](https://example.com/chart.png)",
+      "![👍](tg://emoji?id=5368324170671202286)",
+    ].join("\n");
+
+    const rendered = formatRichMarkdownMessage(markdown);
+
+    expect(rendered.delivery).toBe("rich-markdown");
+    expect(rendered.parseMode).toBeUndefined();
+    expect(rendered.text).toContain("# Report");
+    expect(rendered.text).toContain("| Metric | Value |");
+    expect(rendered.text).toContain("[chart](https://example.com/chart.png)");
+    expect(rendered.text).not.toContain("![chart]");
+    expect(rendered.text).toContain("![👍](tg://emoji?id=5368324170671202286)");
+    expect(rendered.fallbackText).toBe(markdown);
+  });
+
+  it("splits rich Markdown with Telegram's rich-message limit", () => {
+    const markdown = `${"a".repeat(TELEGRAM_RICH_MESSAGE_LIMIT)}${"b".repeat(100)}`;
+    const chunks = splitRichMarkdownForTelegram(markdown);
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks.every((chunk) => chunk.delivery === "rich-markdown")).toBe(true);
+    expect(chunks.every((chunk) => chunk.text.length <= TELEGRAM_RICH_MESSAGE_LIMIT)).toBe(true);
+    expect(chunks.map((chunk) => chunk.sourceText).join("")).toBe(markdown);
+  });
+
+  it("detects Markdown that benefits from Telegram rich messages", () => {
+    expect(isRichMarkdownCandidate("# Heading\n\nBody")).toBe(true);
+    expect(isRichMarkdownCandidate("| A | B |\n|---|---|\n| 1 | 2 |")).toBe(true);
+    expect(isRichMarkdownCandidate("Text with a footnote[^1].\n\n[^1]: Details")).toBe(true);
+    expect(isRichMarkdownCandidate("Plain **bold** text")).toBe(false);
   });
 
   it("provides utility helpers for previews and string cleanup", () => {
