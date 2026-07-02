@@ -2,7 +2,15 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mockState = vi.hoisted(() => ({
+  spawnSync: vi.fn(),
+}));
+
+vi.mock("node:child_process", () => ({
+  spawnSync: mockState.spawnSync,
+}));
 
 import { resolveTelePiInstallContext } from "../../src/install.js";
 import {
@@ -13,6 +21,7 @@ import {
 import type { TelePiInstallContext } from "../../src/install/shared.js";
 
 describe("SystemdManager", () => {
+  const originalEnv = process.env;
   const originalPlatform = process.platform;
   let tempDir: string;
   let homeDir: string;
@@ -58,17 +67,45 @@ describe("SystemdManager", () => {
       ].join("\n"),
     );
 
+    process.env = {
+      ...originalEnv,
+      HOME: homeDir,
+      PATH: "/usr/bin:/bin",
+      UID: "501",
+    };
+    mockState.spawnSync.mockReset();
+    mockState.spawnSync.mockReturnValue({ status: 1, stdout: "", stderr: "systemctl unavailable" });
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
   });
 
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
+    process.env = originalEnv;
     Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+    vi.restoreAllMocks();
   });
+
+  function assertInsideTempHome(filePath: string | undefined): void {
+    if (!filePath) {
+      return;
+    }
+
+    const relativePath = path.relative(homeDir, filePath);
+    if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+      throw new Error(`Unsafe test path outside temp HOME: ${filePath}`);
+    }
+  }
 
   function createLinuxContext(): TelePiInstallContext {
     const cliModuleUrl = pathToFileURL(path.join(packageRoot, "dist", "cli.js")).href;
-    return resolveTelePiInstallContext(cliModuleUrl);
+    const context = resolveTelePiInstallContext(cliModuleUrl);
+    assertInsideTempHome(context.configPath);
+    assertInsideTempHome(context.extensionDestinationPath);
+    assertInsideTempHome(context.serviceUnitPath);
+    assertInsideTempHome(context.serviceUnitLogsDirectory);
+    assertInsideTempHome(context.serviceUnitStdoutPath);
+    assertInsideTempHome(context.serviceUnitStderrPath);
+    return context;
   }
 
   describe("buildSystemdUnit", () => {
