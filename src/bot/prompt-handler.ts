@@ -8,6 +8,7 @@ import {
   buildStreamingPreview,
   formatToolSummaryLine,
   isMessageNotModifiedError,
+  isRichMarkdownCandidate,
   renderExtensionError,
   renderExtensionNotice,
   renderPromptFailure,
@@ -15,6 +16,7 @@ import {
   renderToolStartMessage,
   renderMarkdownChunkWithinLimit,
   splitMarkdownForTelegram,
+  splitRichMarkdownForTelegram,
   TOOL_OUTPUT_PREVIEW_LIMIT,
   type RenderedChunk,
   type RenderedText,
@@ -290,12 +292,14 @@ async function runPromptFlow(
       await safeEditMessage(bot, target, responseMessageId, firstChunk.text, {
         parseMode: firstChunk.parseMode,
         fallbackText: firstChunk.fallbackText,
+        delivery: firstChunk.delivery,
       });
       await removeAbortKeyboard();
     } else {
       const message = await sendTextMessage(bot.api, target, firstChunk.text, {
         parseMode: firstChunk.parseMode,
         fallbackText: firstChunk.fallbackText,
+        delivery: firstChunk.delivery,
       });
       responseMessageId = message.message_id;
     }
@@ -304,6 +308,7 @@ async function runPromptFlow(
       await sendTextMessage(bot.api, target, chunk.text, {
         parseMode: chunk.parseMode,
         fallbackText: chunk.fallbackText,
+        delivery: chunk.delivery,
       });
     }
   };
@@ -338,7 +343,10 @@ async function runPromptFlow(
       return;
     }
 
-    await deliverRenderedChunks(splitMarkdownForTelegram(finalText));
+    const chunks = isRichMarkdownCandidate(finalText)
+      ? splitRichMarkdownForTelegram(finalText)
+      : splitMarkdownForTelegram(finalText);
+    await deliverRenderedChunks(chunks);
   };
 
   let piSession: PiSessionService | undefined;

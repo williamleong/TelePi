@@ -9,6 +9,7 @@ import {
   isMessageNotModifiedError,
   isTelegramParseError,
   splitTelegramText,
+  type TelegramDelivery,
   type TelegramParseMode,
 } from "./message-rendering.js";
 import type { PiSessionContext } from "../pi-session.js";
@@ -18,6 +19,7 @@ export type TextOptions = {
   fallbackText?: string;
   replyMarkup?: InlineKeyboard;
   onSentMessage?: (message: { message_id: number }) => void;
+  delivery?: TelegramDelivery;
 };
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MB
@@ -68,6 +70,27 @@ export async function sendTextMessage(
   text: string,
   options: TextOptions = {},
 ): Promise<{ message_id: number }> {
+  if (options.delivery === "rich-markdown") {
+    try {
+      const message = await api.sendRichMessage(target.chatId, { markdown: text }, {
+        ...(target.messageThreadId !== undefined ? { message_thread_id: target.messageThreadId } : {}),
+        reply_markup: options.replyMarkup,
+      });
+      options.onSentMessage?.(message);
+      return message;
+    } catch (error) {
+      if (options.fallbackText !== undefined) {
+        const message = await api.sendMessage(target.chatId, options.fallbackText, {
+          ...(target.messageThreadId !== undefined ? { message_thread_id: target.messageThreadId } : {}),
+          reply_markup: options.replyMarkup,
+        });
+        options.onSentMessage?.(message);
+        return message;
+      }
+      throw error;
+    }
+  }
+
   const parseMode = Object.prototype.hasOwnProperty.call(options, "parseMode")
     ? options.parseMode
     : "HTML";
@@ -100,6 +123,28 @@ export async function safeEditMessage(
   text: string,
   options: TextOptions = {},
 ): Promise<void> {
+  if (options.delivery === "rich-markdown") {
+    try {
+      await bot.api.editMessageText(target.chatId, messageId, { markdown: text }, {
+        reply_markup: options.replyMarkup,
+      });
+    } catch (error) {
+      if (isMessageNotModifiedError(error)) {
+        return;
+      }
+
+      if (options.fallbackText !== undefined) {
+        await bot.api.editMessageText(target.chatId, messageId, options.fallbackText, {
+          reply_markup: options.replyMarkup,
+        });
+        return;
+      }
+
+      throw error;
+    }
+    return;
+  }
+
   const parseMode = Object.prototype.hasOwnProperty.call(options, "parseMode")
     ? options.parseMode
     : "HTML";
