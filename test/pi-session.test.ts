@@ -18,7 +18,8 @@ const mockState = vi.hoisted(() => {
   const createdSessions: Array<{ session: any; options: any }> = [];
   const createdRuntimes: Array<{ runtime: any; options: any }> = [];
   const modelRegistryInstances: any[] = [];
-  const authStorageInstances: any[] = [];
+  const modelRuntimeInstances: any[] = [];
+  const credentialStoreInstances: any[] = [];
   const sessionSubscribers = new WeakMap<object, (event: any) => void>();
   const sessionPathWorkspaces = new Map<string, string>();
   const resolvedSessionPaths = new Map<string, string>();
@@ -204,9 +205,8 @@ const mockState = vi.hoisted(() => {
   const createAgentSessionServices = vi.fn().mockImplementation(async (options: any) => ({
     cwd: options.cwd,
     agentDir: options.agentDir ?? "/mock-agent",
-    authStorage: options.authStorage ?? { kind: "auth-storage" },
+    modelRuntime: options.modelRuntime,
     settingsManager: options.settingsManager,
-    modelRegistry: options.modelRegistry,
     resourceLoader: { kind: "resource-loader", cwd: options.cwd },
     diagnostics: [],
   }));
@@ -312,20 +312,29 @@ const mockState = vi.hoisted(() => {
     { name: "mock-tool", description: "Mock tool" },
   ]);
 
-  const AuthStorage = {
-    create: vi.fn().mockImplementation(() => {
+  const createReloadingCredentialStore = vi.fn().mockImplementation(async (authPath: string) => {
+    const instance = { kind: "credential-store", authPath };
+    credentialStoreInstances.push(instance);
+    return instance;
+  });
+
+  const ModelRuntime = {
+    create: vi.fn().mockImplementation(async (options: any) => {
       const instance = {
-        kind: "auth-storage",
-        reload: vi.fn(),
+        kind: "model-runtime",
+        credentials: options.credentials,
+        modelsPath: options.modelsPath,
+        getAvailable: vi.fn().mockResolvedValue(models),
       };
-      authStorageInstances.push(instance);
+      modelRuntimeInstances.push(instance);
       return instance;
     }),
   };
 
-  const ModelRegistry = {
-    create: vi.fn().mockImplementation(() => {
+  class ModelRegistry {
+    constructor(modelRuntime: any) {
       const instance = {
+        modelRuntime,
         getAvailable: vi.fn().mockReturnValue(models),
         getAll: vi.fn().mockReturnValue(models),
         find: vi.fn().mockImplementation((provider: string, id: string) =>
@@ -334,8 +343,8 @@ const mockState = vi.hoisted(() => {
       };
       modelRegistryInstances.push(instance);
       return instance;
-    }),
-  };
+    }
+  }
 
   const SessionManager = {
     create: vi.fn().mockImplementation((workspace: string, sessionDir?: string) =>
@@ -367,12 +376,14 @@ const mockState = vi.hoisted(() => {
     createdSessions,
     createdRuntimes,
     modelRegistryInstances,
-    authStorageInstances,
+    modelRuntimeInstances,
+    credentialStoreInstances,
     createAgentSession,
     createAgentSessionRuntime,
     createAgentSessionServices,
     createCodingTools,
-    AuthStorage,
+    createReloadingCredentialStore,
+    ModelRuntime,
     ModelRegistry,
     SessionManager,
     SettingsManager,
@@ -394,15 +405,16 @@ const mockState = vi.hoisted(() => {
       createdSessions.length = 0;
       createdRuntimes.length = 0;
       modelRegistryInstances.length = 0;
+      modelRuntimeInstances.length = 0;
+      credentialStoreInstances.length = 0;
       sessionPathWorkspaces.clear();
       resolvedSessionPaths.clear();
-      authStorageInstances.length = 0;
       createAgentSession.mockClear();
       createAgentSessionRuntime.mockClear();
       createAgentSessionServices.mockClear();
       createCodingTools.mockClear();
-      AuthStorage.create.mockClear();
-      ModelRegistry.create.mockClear();
+      createReloadingCredentialStore.mockClear();
+      ModelRuntime.create.mockClear();
       SessionManager.create.mockClear();
       SessionManager.open.mockClear();
       SessionManager.listAll.mockReset();
@@ -424,11 +436,15 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSessionRuntime: mockState.createAgentSessionRuntime,
   createAgentSessionServices: mockState.createAgentSessionServices,
   createCodingTools: mockState.createCodingTools,
-  AuthStorage: mockState.AuthStorage,
+  ModelRuntime: mockState.ModelRuntime,
   ModelRegistry: mockState.ModelRegistry,
   SessionManager: mockState.SessionManager,
   SettingsManager: mockState.SettingsManager,
   getAgentDir: vi.fn().mockReturnValue("/mock-agent"),
+}));
+
+vi.mock("../src/reloading-credential-store.js", () => ({
+  createReloadingCredentialStore: mockState.createReloadingCredentialStore,
 }));
 
 vi.mock("../src/pi-session-paths.js", async () => {
@@ -468,9 +484,11 @@ describe("PiSessionService", () => {
   it("creates a session service and initializes the Pi session runtime", async () => {
     const service = await PiSessionService.create(createConfig());
 
-    expect(mockState.AuthStorage.create).toHaveBeenCalledTimes(1);
-    expect(mockState.ModelRegistry.create).toHaveBeenCalledTimes(1);
-    expect(mockState.ModelRegistry.create).toHaveBeenCalledWith(expect.objectContaining({ kind: "auth-storage" }));
+    expect(mockState.createReloadingCredentialStore).toHaveBeenCalledWith("/mock-agent/auth.json");
+    expect(mockState.ModelRuntime.create).toHaveBeenCalledWith({
+      credentials: expect.objectContaining({ kind: "credential-store" }),
+      modelsPath: "/mock-agent/models.json",
+    });
     expect(mockState.createAgentSessionRuntime).toHaveBeenCalledWith(
       expect.any(Function),
       expect.objectContaining({
@@ -480,10 +498,7 @@ describe("PiSessionService", () => {
     );
     expect(mockState.SettingsManager.create).toHaveBeenCalledWith("/workspace/base");
     expect(mockState.createAgentSessionServices).toHaveBeenCalledWith(
-      expect.objectContaining({
-        cwd: "/workspace/base",
-        authStorage: expect.objectContaining({ kind: "auth-storage" }),
-      }),
+      expect.objectContaining({ modelRuntime: expect.any(Object) }),
     );
     expect(mockState.createCodingTools).toHaveBeenCalledWith("/workspace/base");
     expect(mockState.createAgentSession).toHaveBeenCalledWith(
@@ -1053,20 +1068,24 @@ describe("PiSessionService", () => {
     expect(withSession).not.toHaveBeenCalled();
   });
 
-  it("recreates the model registry each time the runtime factory creates a same-runtime replacement session", async () => {
+  it("recreates the model runtime and registry each time the runtime factory creates a same-runtime replacement session", async () => {
     const service = await PiSessionService.create(createConfig());
-    const firstRegistry = mockState.createAgentSessionServices.mock.calls[0]?.[0]?.modelRegistry;
+    const runtime = mockState.createdRuntimes[0]?.runtime;
+    const firstModelRuntime = runtime.services.modelRuntime;
+    const firstRegistry = mockState.modelRegistryInstances[0];
 
     await service.switchSession("/sessions/saved.jsonl", "/workspace/projectA");
 
-    const secondRegistry = mockState.createAgentSessionServices.mock.calls[1]?.[0]?.modelRegistry;
-    expect(mockState.ModelRegistry.create).toHaveBeenCalledTimes(2);
-    expect(firstRegistry).toBe(mockState.modelRegistryInstances[0]);
-    expect(secondRegistry).toBe(mockState.modelRegistryInstances[1]);
+    const secondModelRuntime = runtime.services.modelRuntime;
+    const secondRegistry = mockState.modelRegistryInstances[1];
+    expect(mockState.ModelRuntime.create).toHaveBeenCalledTimes(2);
+    expect(firstModelRuntime).toBe(mockState.modelRuntimeInstances[0]);
+    expect(secondModelRuntime).toBe(mockState.modelRuntimeInstances[1]);
+    expect(secondModelRuntime).not.toBe(firstModelRuntime);
     expect(secondRegistry).not.toBe(firstRegistry);
   });
 
-  it("recreates the model registry and reapplies coding-tool activation for cross-runtime replacements", async () => {
+  it("recreates the model runtime and registry and reapplies coding-tool activation for cross-runtime replacements", async () => {
     mockState.createCodingTools.mockReturnValue([
       { name: "read", description: "Read files" },
       { name: "bash", description: "Execute bash" },
@@ -1075,14 +1094,19 @@ describe("PiSessionService", () => {
       { name: "find", description: "Find files" },
     ]);
     const service = await PiSessionService.create(createConfig());
-    const firstRegistry = mockState.createAgentSessionServices.mock.calls[0]?.[0]?.modelRegistry;
+    const firstRuntime = mockState.createdRuntimes[0]?.runtime;
+    const firstModelRuntime = firstRuntime.services.modelRuntime;
+    const firstRegistry = mockState.modelRegistryInstances[0];
 
     await service.newSession("/workspace/other");
 
-    const secondRegistry = mockState.createAgentSessionServices.mock.calls[1]?.[0]?.modelRegistry;
+    const secondRuntime = mockState.createdRuntimes[1]?.runtime;
+    const secondModelRuntime = secondRuntime.services.modelRuntime;
+    const secondRegistry = mockState.modelRegistryInstances[1];
     const replacementSession = mockState.createdSessions[1]?.session;
-    expect(mockState.ModelRegistry.create).toHaveBeenCalledTimes(2);
-    expect(secondRegistry).toBe(mockState.modelRegistryInstances[1]);
+    expect(mockState.ModelRuntime.create).toHaveBeenCalledTimes(2);
+    expect(secondModelRuntime).toBe(mockState.modelRuntimeInstances[1]);
+    expect(secondModelRuntime).not.toBe(firstModelRuntime);
     expect(secondRegistry).not.toBe(firstRegistry);
     expect(replacementSession.setActiveToolsByName).toHaveBeenCalledWith(
       expect.arrayContaining(["read", "bash", "edit", "write", "find", "extension-tool"]),
@@ -1641,6 +1665,41 @@ describe("PiSessionService", () => {
         thinkingLevel: undefined,
       },
     ]);
+    expect(mockState.createdRuntimes[0]?.runtime.services.modelRuntime.getAvailable).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for the model runtime refresh before reading ModelRegistry", async () => {
+    const service = await PiSessionService.create(createConfig());
+    const runtime = mockState.createdRuntimes[0]?.runtime;
+    const registryCount = mockState.modelRegistryInstances.length;
+    let releaseRefresh!: () => void;
+    let markRefreshStarted!: () => void;
+    const refreshStarted = new Promise<void>((resolve) => {
+      markRefreshStarted = resolve;
+    });
+    const refresh = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    runtime.services.modelRuntime.getAvailable.mockImplementationOnce(() => {
+      markRefreshStarted();
+      return refresh;
+    });
+
+    let listResolved = false;
+    const models = service.listModels().then((result) => {
+      listResolved = true;
+      return result;
+    });
+
+    await refreshStarted;
+
+    expect(listResolved).toBe(false);
+    expect(mockState.modelRegistryInstances).toHaveLength(registryCount);
+
+    releaseRefresh();
+
+    await models;
+    expect(mockState.modelRegistryInstances[registryCount]?.getAvailable).toHaveBeenCalledTimes(1);
   });
 
   it("lists only scoped models when the session has a model scope", async () => {
@@ -1658,6 +1717,7 @@ describe("PiSessionService", () => {
         thinkingLevel: "high",
       },
     ]);
+    expect(mockState.createdRuntimes[0]?.runtime.services.modelRuntime.getAvailable).toHaveBeenCalledTimes(1);
   });
 
   it("can list all models even when a scope is active", async () => {
@@ -1682,6 +1742,7 @@ describe("PiSessionService", () => {
         thinkingLevel: "high",
       },
     ]);
+    expect(mockState.createdRuntimes[0]?.runtime.services.modelRuntime.getAvailable).toHaveBeenCalledTimes(1);
   });
 
   it("derives scoped models from pi settings when enabled models are configured", async () => {
@@ -1952,14 +2013,6 @@ describe("PiSessionService", () => {
     expect(onAgentEnd).toHaveBeenCalledTimes(1);
   });
 
-  it("reloads auth storage before prompting", async () => {
-    const service = await PiSessionService.create(createConfig());
-
-    await service.prompt("hello");
-
-    expect(mockState.authStorageInstances[0]?.reload).toHaveBeenCalledTimes(1);
-  });
-
   it("passes image attachments through when prompting", async () => {
     const service = await PiSessionService.create(createConfig());
     const currentSession = mockState.createdSessions[0]?.session;
@@ -1968,14 +2021,6 @@ describe("PiSessionService", () => {
     await service.prompt("hello", images);
 
     expect(currentSession.prompt).toHaveBeenCalledWith("hello", { images });
-  });
-
-  it("reloads auth storage before listing models", async () => {
-    const service = await PiSessionService.create(createConfig());
-
-    await service.listModels();
-
-    expect(mockState.authStorageInstances[0]?.reload).toHaveBeenCalledTimes(1);
   });
 
   it("wraps prompt errors with a helpful message", async () => {

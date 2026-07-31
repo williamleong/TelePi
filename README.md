@@ -18,7 +18,7 @@ You need:
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 - Your numeric Telegram user ID for the allowlist
 - Pi installed and authenticated locally (`~/.pi/agent/auth.json` exists after a working Pi login)
-- Pi SDK packages 0.80.x; the npm global install resolves these peer packages automatically with current npm
+- Pi SDK packages 0.83.x; the npm global install includes them as embedded runtime dependencies
 
 Install the npm package and run the guided setup:
 
@@ -172,7 +172,7 @@ Use a source checkout when you want to hack on TelePi or run the latest unreleas
    node dist/cli.js status
    ```
 
-If you are working from a built checkout or GitHub Release artifact instead of a global npm install, install runtime dependencies first — the `dist/` files are not self-contained. Do not use `--omit=dev` by itself from a source checkout, because TelePi declares the Pi SDK as peer dependencies and keeps compatible SDK copies in `devDependencies` for development:
+If you are working from a built checkout or GitHub Release artifact instead of a global npm install, install runtime dependencies first — the `dist/` files are not self-contained. TelePi includes the Pi SDK as direct runtime dependencies, so `--omit=dev` retains the compatible SDK:
 
 ```bash
 npm install
@@ -180,14 +180,14 @@ node dist/cli.js setup
 node dist/cli.js start
 ```
 
-For a smaller runtime-only checkout install, install the peer SDK packages explicitly after the production install:
+For a smaller runtime-only checkout install, use the embedded Pi SDK dependencies. To install them manually, pin all three packages to the embedded version:
 
 ```bash
 npm ci --omit=dev
 npm install --no-save \
-  @earendil-works/pi-agent-core@^0.80.3 \
-  @earendil-works/pi-ai@^0.80.3 \
-  @earendil-works/pi-coding-agent@^0.80.3
+  @earendil-works/pi-agent-core@0.83.0 \
+  @earendil-works/pi-ai@0.83.0 \
+  @earendil-works/pi-coding-agent@0.83.0
 node dist/cli.js setup
 node dist/cli.js start
 ```
