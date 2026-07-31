@@ -1668,6 +1668,40 @@ describe("PiSessionService", () => {
     expect(mockState.createdRuntimes[0]?.runtime.services.modelRuntime.getAvailable).toHaveBeenCalledTimes(1);
   });
 
+  it("waits for the model runtime refresh before reading ModelRegistry", async () => {
+    const service = await PiSessionService.create(createConfig());
+    const runtime = mockState.createdRuntimes[0]?.runtime;
+    const registryCount = mockState.modelRegistryInstances.length;
+    let releaseRefresh!: () => void;
+    let markRefreshStarted!: () => void;
+    const refreshStarted = new Promise<void>((resolve) => {
+      markRefreshStarted = resolve;
+    });
+    const refresh = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    runtime.services.modelRuntime.getAvailable.mockImplementationOnce(() => {
+      markRefreshStarted();
+      return refresh;
+    });
+
+    let listResolved = false;
+    const models = service.listModels().then((result) => {
+      listResolved = true;
+      return result;
+    });
+
+    await refreshStarted;
+
+    expect(listResolved).toBe(false);
+    expect(mockState.modelRegistryInstances).toHaveLength(registryCount);
+
+    releaseRefresh();
+
+    await models;
+    expect(mockState.modelRegistryInstances[registryCount]?.getAvailable).toHaveBeenCalledTimes(1);
+  });
+
   it("lists only scoped models when the session has a model scope", async () => {
     const service = await PiSessionService.create(createConfig());
     const currentSession = mockState.createdSessions[0]?.session;
