@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 
-export const REQUIRED_PI_SDK_RANGE = ">=0.80.0 <0.81.0";
+export const REQUIRED_PI_SDK_RANGE = ">=0.83.0 <0.84.0";
 export const REQUIRED_PI_AI_COMPAT_ENTRYPOINT = "@earendil-works/pi-ai/compat";
 
 const PI_AI_PACKAGE_NAME = "@earendil-works/pi-ai";
@@ -21,7 +21,7 @@ export function assertPiSdkCompatibility(
     throw new Error(
       `TelePi requires @earendil-works Pi SDK packages ${REQUIRED_PI_SDK_RANGE}; ` +
         `the resolved SDK does not expose ${REQUIRED_PI_AI_COMPAT_ENTRYPOINT}. ` +
-        "Install compatible peer dependencies or update the Pi SDK packages used by TelePi. " +
+        "Install compatible runtime dependencies or update the Pi SDK packages used by TelePi. " +
         `Resolver error: ${detail}`,
     );
   }

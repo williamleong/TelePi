@@ -20,7 +20,7 @@ describe("package metadata", () => {
     expect(dockerfile).toContain("FROM node:22.19-alpine");
   });
 
-  it("declares Pi SDK packages as peer dependencies with matching development versions", () => {
+  it("declares Pi SDK packages as embedded 0.83 runtime dependencies", () => {
     const packageJson = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
       dependencies?: Record<string, string>;
       devDependencies?: Record<string, string>;
@@ -35,11 +35,11 @@ describe("package metadata", () => {
     const readme = readFileSync(path.join(repoRoot, "README.md"), "utf8");
 
     for (const packageName of piPackages) {
-      expect(packageJson.dependencies?.[packageName]).toBeUndefined();
-      expect(packageJson.peerDependencies?.[packageName]).toBe(">=0.80.0 <0.81.0");
-      expect(packageJson.devDependencies?.[packageName]).toBe("^0.80.3");
+      expect(packageJson.dependencies?.[packageName]).toBe("0.83.0");
+      expect(packageJson.devDependencies?.[packageName]).toBeUndefined();
+      expect(packageJson.peerDependencies?.[packageName]).toBeUndefined();
     }
-    expect(readme).toContain("Pi SDK packages 0.80.x");
+    expect(readme).toContain("Pi SDK packages 0.83.x");
   });
 
   it("includes the Linux systemd template in GitHub release artifacts", () => {

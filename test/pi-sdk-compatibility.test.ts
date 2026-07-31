@@ -14,7 +14,7 @@ describe("assertPiSdkCompatibility", () => {
     expect(() => assertPiSdkCompatibility(() => {
       throw new Error("Package subpath './compat' is not defined by exports");
     })).toThrow(
-      "TelePi requires @earendil-works Pi SDK packages >=0.80.0 <0.81.0",
+      "TelePi requires @earendil-works Pi SDK packages >=0.83.0 <0.84.0",
     );
   });
 });
