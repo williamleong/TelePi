@@ -38,6 +38,7 @@ import {
 } from "./pi-session-paths.js";
 import { assertPiSdkCompatibility } from "./pi-sdk-compatibility.js";
 import { buildLastExchangePreview, type PiSessionExchangePreview } from "./session-exchange-preview.js";
+import { TopicSessionStore } from "./topic-session-store.js";
 import { describeEntry, type SessionTreeNodeLike as SessionTreeNode } from "./tree.js";
 
 /**
@@ -1274,12 +1275,18 @@ export class PiSessionRegistry {
   private readonly generations = new Map<string, number>();
   private bootstrapSessionPath?: string;
 
-  private constructor(private readonly config: TelePiConfig) {
+  private constructor(
+    private readonly config: TelePiConfig,
+    private readonly topicSessionStore: TopicSessionStore = TopicSessionStore.memory(),
+  ) {
     this.bootstrapSessionPath = config.piSessionPath;
   }
 
-  static async create(config: TelePiConfig): Promise<PiSessionRegistry> {
-    return new PiSessionRegistry(config);
+  static async create(
+    config: TelePiConfig,
+    topicSessionStore?: TopicSessionStore,
+  ): Promise<PiSessionRegistry> {
+    return new PiSessionRegistry(config, topicSessionStore);
   }
 
   has(context: PiSessionContext): boolean {
@@ -1314,7 +1321,7 @@ export class PiSessionRegistry {
     }
 
     const generation = this.bumpGeneration(key);
-    const createPromise = PiSessionService.create(this.createServiceConfig())
+    const createPromise = PiSessionService.create(this.createServiceConfig(key))
       .then((service) => {
         this.inflight.delete(key);
 
@@ -1328,6 +1335,10 @@ export class PiSessionRegistry {
         }
 
         this.services.set(key, service);
+        const { sessionFile, workspace } = service.getInfo();
+        if (sessionFile) {
+          this.topicSessionStore.set(key, { sessionFile, workspace });
+        }
         return service;
       })
       .catch((error) => {
@@ -1360,12 +1371,39 @@ export class PiSessionRegistry {
     this.inflight.clear();
   }
 
-  private createServiceConfig(): TelePiConfig {
-    const initialSessionPath = this.consumeBootstrapSessionPath();
+  private createServiceConfig(key: string): TelePiConfig {
+    const bootstrapPath = this.consumeBootstrapSessionPath();
+    if (bootstrapPath) {
+      return {
+        ...this.config,
+        telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
+        piSessionPath: bootstrapPath,
+      };
+    }
+
+    const saved = this.topicSessionStore.get(key);
+    if (!saved) {
+      return {
+        ...this.config,
+        telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
+        piSessionPath: undefined,
+      };
+    }
+    if (!existsSync(saved.sessionFile)) {
+      console.warn(`Saved Pi session for Telegram context ${key} no longer exists; starting a new session.`);
+      this.topicSessionStore.delete(key);
+      return {
+        ...this.config,
+        telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
+        piSessionPath: undefined,
+      };
+    }
+
     return {
       ...this.config,
       telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
-      piSessionPath: initialSessionPath,
+      workspace: saved.workspace,
+      piSessionPath: saved.sessionFile,
     };
   }
 

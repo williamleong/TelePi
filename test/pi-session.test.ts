@@ -461,6 +461,7 @@ vi.mock("../src/pi-session-paths.js", async () => {
 });
 
 import { getPiSessionContextKey, PiSessionRegistry, PiSessionService } from "../src/pi-session.js";
+import { TopicSessionStore } from "../src/topic-session-store.js";
 
 describe("PiSessionService", () => {
   const createConfig = (overrides: Partial<TelePiConfig> = {}): TelePiConfig => ({
@@ -2148,6 +2149,103 @@ describe("PiSessionService", () => {
   it("builds stable context keys for chat/topic pairs", () => {
     expect(getPiSessionContextKey({ chatId: 123 })).toBe("123::root");
     expect(getPiSessionContextKey({ chatId: 123, messageThreadId: 77 })).toBe("123::77");
+  });
+
+  it("restores a topic session after recreating the registry", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "telepi-registry-"));
+    const sessionFile = path.join(tempDir, "saved.jsonl");
+    writeFileSync(sessionFile, "{}\n");
+    const store = TopicSessionStore.memory();
+    store.set("1::99", { sessionFile, workspace: "/workspace/saved" });
+
+    try {
+      const registry = await PiSessionRegistry.create(createConfig(), store);
+      await registry.getOrCreate({ chatId: 1, messageThreadId: 99 });
+
+      expect(mockState.SessionManager.open).toHaveBeenCalledWith(
+        sessionFile,
+        undefined,
+        "/workspace/saved",
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("creates a new session for a topic without a stored session", async () => {
+    const store = TopicSessionStore.memory();
+    const registry = await PiSessionRegistry.create(createConfig(), store);
+
+    await registry.getOrCreate({ chatId: 1, messageThreadId: 100 });
+
+    expect(mockState.SessionManager.create).toHaveBeenCalledWith("/workspace/base");
+  });
+
+  it("uses bootstrap and replaces the stored topic session", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "telepi-registry-"));
+    const savedSessionFile = path.join(tempDir, "saved.jsonl");
+    writeFileSync(savedSessionFile, "{}\n");
+    const store = TopicSessionStore.memory();
+    store.set("1::99", { sessionFile: savedSessionFile, workspace: "/workspace/saved" });
+
+    try {
+      const registry = await PiSessionRegistry.create(
+        createConfig({ piSessionPath: "/sessions/bootstrap.jsonl" }),
+        store,
+      );
+      await registry.getOrCreate({ chatId: 1, messageThreadId: 99 });
+
+      expect(mockState.SessionManager.open).toHaveBeenCalledWith(
+        "/sessions/bootstrap.jsonl",
+        undefined,
+        "/workspace/base",
+      );
+      expect(store.get("1::99")).toEqual({
+        sessionFile: "/sessions/bootstrap.jsonl",
+        workspace: "/workspace/base",
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("deletes only a missing saved topic session before creating a new one", async () => {
+    const store = TopicSessionStore.memory();
+    store.set("1::99", { sessionFile: "/missing/saved.jsonl", workspace: "/workspace/missing" });
+    store.set("1::100", { sessionFile: "/other/saved.jsonl", workspace: "/workspace/other" });
+    const deleteSpy = vi.spyOn(store, "delete");
+    const registry = await PiSessionRegistry.create(createConfig(), store);
+
+    await registry.getOrCreate({ chatId: 1, messageThreadId: 99 });
+
+    expect(deleteSpy).toHaveBeenCalledWith("1::99");
+    expect(store.get("1::99")).toEqual({
+      sessionFile: "/tmp/session-1.jsonl",
+      workspace: "/workspace/base",
+    });
+    expect(store.get("1::100")).toEqual({
+      sessionFile: "/other/saved.jsonl",
+      workspace: "/workspace/other",
+    });
+    expect(mockState.SessionManager.create).toHaveBeenCalledWith("/workspace/base");
+  });
+
+  it("leaves persisted topic sessions intact when the registry is disposed", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "telepi-registry-"));
+    const sessionFile = path.join(tempDir, "saved.jsonl");
+    writeFileSync(sessionFile, "{}\n");
+    const store = TopicSessionStore.memory();
+    store.set("1::99", { sessionFile, workspace: "/workspace/saved" });
+
+    try {
+      const registry = await PiSessionRegistry.create(createConfig(), store);
+      await registry.getOrCreate({ chatId: 1, messageThreadId: 99 });
+      registry.dispose();
+
+      expect(store.get("1::99")).toEqual({ sessionFile, workspace: "/workspace/saved" });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("creates independent services per Telegram context", async () => {
