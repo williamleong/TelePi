@@ -436,6 +436,7 @@ async function runPromptFlow(
 
       scheduleFlush();
     },
+    onThinkingDelta: () => {},
     onToolStart: (toolName, toolCallId) => {
       if (toolVerbosity === "summary") {
         toolCounts.set(toolName, (toolCounts.get(toolName) ?? 0) + 1);

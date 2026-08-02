@@ -52,9 +52,15 @@ const TELEPI_LAUNCHD_LABEL = "com.telepi";
 const TELEPI_SELF_MANAGEMENT_ERROR =
   `Blocked TelePi self-management command. launchctl commands targeting ${TELEPI_LAUNCHD_LABEL} cannot run from inside a TelePi session. Manage the launchd service from a separate shell instead.`;
 
+export interface PiThinkingDelta {
+  blockKey: string;
+  delta: string;
+}
+
 export interface PiSessionCallbacks {
   onTextDelta: (delta: string) => void;
-  onToolStart: (toolName: string, toolCallId: string) => void;
+  onThinkingDelta: (event: PiThinkingDelta) => void;
+  onToolStart: (toolName: string, toolCallId: string, args: unknown) => void;
   onToolUpdate: (toolCallId: string, partialResult: string) => void;
   onToolEnd: (toolCallId: string, isError: boolean) => void;
   onAgentEnd: () => void;
@@ -562,13 +568,20 @@ export function subscribeToSession(
 ): () => void {
   return session.subscribe((event) => {
     switch (event.type) {
-      case "message_update":
-        if (event.assistantMessageEvent.type === "text_delta") {
-          callbacks.onTextDelta(event.assistantMessageEvent.delta);
+      case "message_update": {
+        const update = event.assistantMessageEvent;
+        if (update.type === "text_delta") {
+          callbacks.onTextDelta(update.delta);
+        } else if (update.type === "thinking_delta") {
+          callbacks.onThinkingDelta({
+            blockKey: `${event.message.timestamp}:${update.contentIndex}`,
+            delta: update.delta,
+          });
         }
         break;
+      }
       case "tool_execution_start":
-        callbacks.onToolStart(event.toolName, event.toolCallId);
+        callbacks.onToolStart(event.toolName, event.toolCallId, event.args);
         break;
       case "tool_execution_update":
         callbacks.onToolUpdate(event.toolCallId, stringifyToolData(event.partialResult));
