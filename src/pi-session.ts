@@ -681,6 +681,10 @@ export class PiSessionService {
     await promptSession(this.getSession(), text, images);
   }
 
+  setSessionName(name: string): void {
+    this.getSession().setSessionName(name);
+  }
+
   async bindExtensions(bindings: Parameters<AgentSession["bindExtensions"]>[0]): Promise<void> {
     this.extensionBindings = bindings;
     await this.bindExtensionsToCurrentSession();

@@ -144,6 +144,17 @@ function isForumTopicServiceMessage(ctx: Context): boolean {
   return message !== undefined && FORUM_TOPIC_SERVICE_MESSAGE_KEYS.some((key) => key in message);
 }
 
+function getEditedForumTopicName(ctx: Context): string | undefined {
+  const message = ctx.message as Record<string, unknown> | undefined;
+  const edit = message?.forum_topic_edited;
+  if (!edit || typeof edit !== "object") {
+    return undefined;
+  }
+
+  const name = (edit as Record<string, unknown>).name;
+  return typeof name === "string" && name.length > 0 ? name : undefined;
+}
+
 export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegistry): Bot<Context> {
   const bot = new Bot<Context>(config.telegramBotToken);
   bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 10 }));
@@ -313,6 +324,25 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   const getExistingSession = (target: PiSessionContext): PiSessionService | undefined => sessionRegistry.get(target);
   const getOrCreateSession = async (target: PiSessionContext): Promise<PiSessionService> =>
     sessionRegistry.getOrCreate(target);
+
+  const syncEditedForumTopicToSession = (ctx: Context): void => {
+    const name = getEditedForumTopicName(ctx);
+    const target = getRawTelegramTarget(ctx);
+    if (!name || target?.messageThreadId === undefined) {
+      return;
+    }
+
+    const session = getExistingSession(target);
+    if (!session || session.getInfo().sessionName === name) {
+      return;
+    }
+
+    try {
+      session.setSessionName(name);
+    } catch (error) {
+      console.error("Failed to rename Pi session from Telegram forum topic:", formatError(error));
+    }
+  };
 
   const extensionDialogs = createExtensionDialogManager({
     getContextKey,
@@ -584,6 +614,10 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
 
   bot.use(async (ctx, next) => {
     if (isForumTopicServiceMessage(ctx)) {
+      const fromId = ctx.from?.id;
+      if (fromId && config.telegramAllowedUserIdSet.has(fromId)) {
+        syncEditedForumTopicToSession(ctx);
+      }
       return;
     }
 
