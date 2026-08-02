@@ -99,7 +99,7 @@ async function runPromptFlow(
     renameForumTopicToSessionName,
   } = deps;
 
-  const activityEnabled = deps.isActivityEnabled?.(target) ?? true;
+  const activityEnabled = deps.isActivityEnabled(target);
   const activityTranscript = activityEnabled ? createActivityTranscript() : undefined;
   const abortKeyboard = new InlineKeyboard().text("⏹ Abort", "pi_abort");
   const toolStates = new Map<string, ToolState>();
@@ -123,6 +123,9 @@ async function runPromptFlow(
   let activityFlushPromise: Promise<void> | undefined;
   let activityFinalizationPromise: Promise<void> | undefined;
   let activityFinalized = false;
+  let activityFinalizing = false;
+  let activityVersion = 0;
+  let deliveredActivityVersion = 0;
   let lastActivityFlushAt = 0;
   let typingStopped = false;
 
@@ -294,70 +297,87 @@ async function runPromptFlow(
   };
 
   const scheduleActivityFlush = (): void => {
-    if (!activityTranscript || activityDeliveryFailed || activityFinalized || activityFlushTimer) {
-      return;
-    }
-
-    const delay = Math.max(0, editDebounceMs - (Date.now() - lastActivityFlushAt));
-    activityFlushTimer = setTimeout(() => {
-      activityFlushTimer = undefined;
-      activityFlushPromise = flushActivity();
-      void activityFlushPromise.catch(() => {});
-    }, delay);
-  };
-
-  const flushActivity = async (force = false): Promise<void> => {
-    if (!activityTranscript || activityDeliveryFailed || activityTranscript.entries.length === 0) {
+    if (!activityTranscript || activityDeliveryFailed || activityFinalizing || activityFinalized) {
       return;
     }
     if (activityFlushInProgress) {
       activityFlushPending = true;
       return;
     }
+    if (activityFlushTimer) {
+      return;
+    }
+
+    const delay = Math.max(0, editDebounceMs - (Date.now() - lastActivityFlushAt));
+    activityFlushTimer = setTimeout(() => {
+      activityFlushTimer = undefined;
+      if (activityFinalizing || activityFinalized) {
+        return;
+      }
+      void flushActivity().catch(() => {});
+    }, delay);
+  };
+
+  const flushActivity = (force = false): Promise<void> => {
+    if (!activityTranscript || activityDeliveryFailed || activityTranscript.entries.length === 0) {
+      return Promise.resolve();
+    }
+    if (activityFlushInProgress) {
+      activityFlushPending = true;
+      return activityFlushPromise!;
+    }
 
     const now = Date.now();
     if (!force && now - lastActivityFlushAt < editDebounceMs) {
       scheduleActivityFlush();
-      return;
+      return Promise.resolve();
     }
 
     activityFlushInProgress = true;
-    try {
-      const chunks = renderActivityTranscript(activityTranscript);
-      for (const [index, chunk] of chunks.entries()) {
-        const messageId = activityMessageIds[index];
-        const previousChunk = lastActivityChunks[index];
-        if (messageId === undefined) {
-          const message = await sendTextMessage(bot.api, target, chunk.text, {
+    const flushVersion = activityVersion;
+    activityFlushPromise = Promise.resolve().then(async () => {
+      try {
+        const chunks = renderActivityTranscript(activityTranscript);
+        for (const [index, chunk] of chunks.entries()) {
+          const messageId = activityMessageIds[index];
+          const previousChunk = lastActivityChunks[index];
+          if (messageId === undefined) {
+            const message = await sendTextMessage(bot.api, target, chunk.text, {
+              parseMode: chunk.parseMode,
+              fallbackText: chunk.fallbackText,
+              delivery: chunk.delivery,
+            });
+            activityMessageIds[index] = message.message_id;
+            continue;
+          }
+          if (previousChunk?.text === chunk.text && previousChunk?.fallbackText === chunk.fallbackText) {
+            continue;
+          }
+          await safeEditMessage(bot, target, messageId, chunk.text, {
             parseMode: chunk.parseMode,
             fallbackText: chunk.fallbackText,
             delivery: chunk.delivery,
           });
-          activityMessageIds[index] = message.message_id;
-          continue;
         }
-        if (previousChunk?.text === chunk.text && previousChunk?.fallbackText === chunk.fallbackText) {
-          continue;
+        lastActivityChunks = chunks;
+        lastActivityFlushAt = Date.now();
+        deliveredActivityVersion = flushVersion;
+      } catch (error) {
+        console.error("Failed to update Telegram activity transcript", error);
+        activityDeliveryFailed = true;
+        clearActivityFlushTimer();
+      } finally {
+        activityFlushInProgress = false;
+        activityFlushPromise = undefined;
+        if (activityFlushPending) {
+          activityFlushPending = false;
+          if (!activityDeliveryFailed && !activityFinalizing && !activityFinalized) {
+            scheduleActivityFlush();
+          }
         }
-        await safeEditMessage(bot, target, messageId, chunk.text, {
-          parseMode: chunk.parseMode,
-          fallbackText: chunk.fallbackText,
-          delivery: chunk.delivery,
-        });
       }
-      lastActivityChunks = chunks;
-      lastActivityFlushAt = Date.now();
-    } catch (error) {
-      console.error("Failed to update Telegram activity transcript", error);
-      activityDeliveryFailed = true;
-      clearActivityFlushTimer();
-    } finally {
-      activityFlushInProgress = false;
-      if (activityFlushPending && !activityDeliveryFailed && !activityFinalized) {
-        activityFlushPending = false;
-        scheduleActivityFlush();
-      }
-    }
+    });
+    return activityFlushPromise;
   };
 
   const finalizeActivity = async (): Promise<void> => {
@@ -367,16 +387,16 @@ async function runPromptFlow(
     }
 
     activityFinalizationPromise = (async () => {
+      activityFinalizing = true;
       clearActivityFlushTimer();
-      if (activityFlushInProgress) {
-        activityFlushPending = true;
-        await activityFlushPromise;
+      while (!activityDeliveryFailed && activityTranscript?.entries.length) {
+        await flushActivity(true);
+        clearActivityFlushTimer();
+        if (deliveredActivityVersion >= activityVersion && !activityFlushInProgress && !activityFlushPending) {
+          break;
+        }
       }
-      activityFlushPromise = flushActivity(true);
-      await activityFlushPromise;
       clearActivityFlushTimer();
-      activityFlushPromise = flushActivity(true);
-      await activityFlushPromise;
       activityFinalized = true;
     })();
 
@@ -562,11 +582,13 @@ async function runPromptFlow(
         return;
       }
       activityTranscript.appendThinking(event);
+      activityVersion += 1;
       scheduleActivityFlush();
     },
     onToolStart: (toolName, toolCallId, args) => {
       if (activityTranscript) {
         activityTranscript.startTool(toolCallId, toolName, args);
+        activityVersion += 1;
         scheduleActivityFlush();
         return;
       }
@@ -623,6 +645,7 @@ async function runPromptFlow(
     onToolEnd: (toolCallId, isError) => {
       if (activityTranscript) {
         activityTranscript.finishTool(toolCallId, isError);
+        activityVersion += 1;
         scheduleActivityFlush();
         return;
       }
