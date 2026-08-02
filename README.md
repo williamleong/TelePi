@@ -54,6 +54,7 @@ TelePi gives Telegram access to a coding agent, so it is designed to stay privat
 
 - **Bi-directional hand-off**: Move sessions CLI → Telegram (`/handoff`) and back (`/handback`)
 - **Per-chat/topic sessions**: Every Telegram chat or forum topic gets its own Pi session, picker state, and retry history
+- **Two-way topic naming**: Renaming an active Pi session renames its Telegram forum topic, and an allowlisted Telegram topic rename updates the active mapped session. Topic renames do not create sessions when no active mapping exists.
 - **Voice and image messages**: Send voice/audio for transcription, or photos/image documents as Pi image inputs
 - **Local or cloud transcription**: [Parakeet CoreML](https://github.com/sebastian-software/parakeet-coreml) on Apple Silicon, [Sherpa-ONNX Parakeet](https://k2-fsa.github.io/sherpa/onnx/) for Intel Macs (and as a CPU fallback), or OpenAI Whisper in the cloud
 - **Session tree navigation**: Browse, branch, and label your Pi session history with `/tree`, `/branch`, `/label`
@@ -214,7 +215,7 @@ node dist/cli.js start
 | `/branch <id>` | Navigate to a specific entry ID (with confirmation) |
 | `/label [args]` | Add or clear labels on entries for easy reference |
 
-Sessions, inline keyboards, and `/retry` state are isolated per Telegram chat/topic, so forum topics can be used independently without colliding with each other.
+Sessions, inline keyboards, `/retry` state, and active topic-name mappings are isolated per Telegram chat/topic, so forum topics can be used independently without colliding with each other.
 
 `/commands` now opens a mobile-friendly inline picker with pagination plus `All`, `TelePi`, and `Pi` filters. Tapping a TelePi entry runs the built-in command immediately, and tapping a Pi entry forwards the slash command into the active Pi session. Telegram-compatible discovered Pi commands (for example `/review` or `/compact`) are also synced into Telegram's native slash-command interface for the current chat. Commands that Telegram cannot represent, such as `/skill:browser-tools`, stay available through the picker and by manual typing.
 

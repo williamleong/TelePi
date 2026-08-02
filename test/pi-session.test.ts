@@ -123,6 +123,7 @@ const mockState = vi.hoisted(() => {
         },
       },
       prompt: vi.fn().mockResolvedValue(undefined),
+      setSessionName: vi.fn(),
       bindExtensions: vi.fn().mockResolvedValue(undefined),
       abort: vi.fn().mockResolvedValue(undefined),
       reload: vi.fn().mockResolvedValue(undefined),
@@ -2058,6 +2059,15 @@ describe("PiSessionService", () => {
     expect(onToolEnd).toHaveBeenCalledWith("tool-1", false);
     expect(onSessionInfoChanged).toHaveBeenCalledWith("Auto title");
     expect(onAgentEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("renames the active Pi session", async () => {
+    const service = await PiSessionService.create(createConfig());
+    const currentSession = mockState.createdSessions[0]?.session;
+
+    service.setSessionName("Project kickoff");
+
+    expect(currentSession.setSessionName).toHaveBeenCalledWith("Project kickoff");
   });
 
   it("passes image attachments through when prompting", async () => {

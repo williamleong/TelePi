@@ -334,6 +334,7 @@ function createMockPiSession(overrides: Partial<PiSessionService> = {}) {
       extensionBindings = bindings;
     }),
     prompt: vi.fn().mockResolvedValue(undefined),
+    setSessionName: vi.fn(),
     getSession: vi.fn().mockReturnValue({
       agent: { waitForIdle: vi.fn().mockResolvedValue(undefined) },
     }),
@@ -1106,23 +1107,219 @@ describe("createBot", () => {
     expect(api.sendMessage.mock.calls[0]?.[1]).toBe("Unauthorized");
   });
 
-  it("ignores Telegram forum-topic service messages instead of replying unauthorized", async () => {
-    const { bot, api } = setupBot();
+  describe("forum-topic service messages", () => {
+    it("renames an existing topic session when an allowed user renames the topic", async () => {
+      const { bot, api, registry } = setupBot();
+      const target = { chatId: ALLOWED_CHAT_ID, messageThreadId: 777 };
+      await registry.registry.getOrCreate(target);
+      const topicSession = registry.getSession(ALLOWED_CHAT_ID, 777)!;
+      (registry.registry.getOrCreate as ReturnType<typeof vi.fn>).mockClear();
 
-    await bot.handleUpdate(
-      createTestUpdate({
+      await bot.handleUpdate(createTestUpdate({
         message: {
           text: undefined,
           entities: undefined,
           chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
-          from: { id: 1, is_bot: true, first_name: "TelePi" },
+          from: { id: ALLOWED_USER_ID, is_bot: false, first_name: "Test" },
           message_thread_id: 777,
           forum_topic_edited: { name: "Project kickoff" },
         },
-      }),
-    );
+      }));
 
-    expect(api.sendMessage).not.toHaveBeenCalled();
+      expect(topicSession.service.setSessionName).toHaveBeenCalledWith("Project kickoff");
+      expect(registry.registry.getOrCreate).not.toHaveBeenCalled();
+      expect(api.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it("ignores an allowed topic edit without a thread ID", async () => {
+      const { bot, api, registry } = setupBot();
+      const chatSession = registry.getSession()!;
+
+      await bot.handleUpdate(createTestUpdate({
+        message: {
+          text: undefined,
+          entities: undefined,
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          from: { id: ALLOWED_USER_ID, is_bot: false, first_name: "Test" },
+          forum_topic_edited: { name: "Project kickoff" },
+        },
+      }));
+
+      expect(chatSession.service.setSessionName).not.toHaveBeenCalled();
+      expect(registry.registry.getOrCreate).not.toHaveBeenCalled();
+      expect(api.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it("does not create a session for a renamed topic without one", async () => {
+      const { bot, api, registry } = setupBot();
+
+      await bot.handleUpdate(createTestUpdate({
+        message: {
+          text: undefined,
+          entities: undefined,
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          from: { id: ALLOWED_USER_ID, is_bot: false, first_name: "Test" },
+          message_thread_id: 778,
+          forum_topic_edited: { name: "Project kickoff" },
+        },
+      }));
+
+      expect(registry.registry.getOrCreate).not.toHaveBeenCalled();
+      expect(registry.getSession(ALLOWED_CHAT_ID, 778)).toBeUndefined();
+      expect(api.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it("does not rename a topic session that already has the edited name", async () => {
+      const target = { chatId: ALLOWED_CHAT_ID, messageThreadId: 777 };
+      const { bot, registry } = setupBot({
+        perContextSessionOverrides: {
+          [makeContextKey(ALLOWED_CHAT_ID, 777)]: {
+            getInfo: vi.fn().mockReturnValue({
+              sessionId: "test-id",
+              sessionFile: "/tmp/test.jsonl",
+              workspace: "/workspace",
+              model: "anthropic/claude-sonnet-4-5",
+              sessionName: "Project kickoff",
+              modelFallbackMessage: undefined,
+            }),
+          },
+        },
+      });
+      await registry.registry.getOrCreate(target);
+      const topicSession = registry.getSession(ALLOWED_CHAT_ID, 777)!;
+
+      await bot.handleUpdate(createTestUpdate({
+        message: {
+          text: undefined,
+          entities: undefined,
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          from: { id: ALLOWED_USER_ID, is_bot: false, first_name: "Test" },
+          message_thread_id: 777,
+          forum_topic_edited: { name: "Project kickoff" },
+        },
+      }));
+
+      expect(topicSession.service.setSessionName).not.toHaveBeenCalled();
+    });
+
+    it("does not rename a topic session for an unauthorized user", async () => {
+      const { bot, api, registry } = setupBot();
+      const target = { chatId: ALLOWED_CHAT_ID, messageThreadId: 777 };
+      await registry.registry.getOrCreate(target);
+      const topicSession = registry.getSession(ALLOWED_CHAT_ID, 777)!;
+
+      await bot.handleUpdate(createTestUpdate({
+        message: {
+          text: undefined,
+          entities: undefined,
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          from: { id: 999, is_bot: false, first_name: "Eve" },
+          message_thread_id: 777,
+          forum_topic_edited: { name: "Project kickoff" },
+        },
+      }));
+
+      expect(topicSession.service.setSessionName).not.toHaveBeenCalled();
+      expect(api.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it("ignores a forum topic edit that changes only its icon", async () => {
+      const { bot, registry } = setupBot();
+      const target = { chatId: ALLOWED_CHAT_ID, messageThreadId: 777 };
+      await registry.registry.getOrCreate(target);
+      const topicSession = registry.getSession(ALLOWED_CHAT_ID, 777)!;
+
+      await bot.handleUpdate(createTestUpdate({
+        message: {
+          text: undefined,
+          entities: undefined,
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          from: { id: ALLOWED_USER_ID, is_bot: false, first_name: "Test" },
+          message_thread_id: 777,
+          forum_topic_edited: { icon_custom_emoji_id: "emoji-1" },
+        },
+      }));
+
+      expect(topicSession.service.setSessionName).not.toHaveBeenCalled();
+    });
+
+    it("ignores a forum topic edit with an empty name", async () => {
+      const { bot, registry } = setupBot();
+      const target = { chatId: ALLOWED_CHAT_ID, messageThreadId: 777 };
+      await registry.registry.getOrCreate(target);
+      const topicSession = registry.getSession(ALLOWED_CHAT_ID, 777)!;
+
+      await bot.handleUpdate(createTestUpdate({
+        message: {
+          text: undefined,
+          entities: undefined,
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          from: { id: ALLOWED_USER_ID, is_bot: false, first_name: "Test" },
+          message_thread_id: 777,
+          forum_topic_edited: { name: "" },
+        },
+      }));
+
+      expect(topicSession.service.setSessionName).not.toHaveBeenCalled();
+    });
+
+    it("ignores a closed forum topic service message", async () => {
+      const { bot, api, registry } = setupBot();
+      const target = { chatId: ALLOWED_CHAT_ID, messageThreadId: 777 };
+      await registry.registry.getOrCreate(target);
+      const topicSession = registry.getSession(ALLOWED_CHAT_ID, 777)!;
+
+      await bot.handleUpdate(createTestUpdate({
+        message: {
+          text: undefined,
+          entities: undefined,
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          from: { id: ALLOWED_USER_ID, is_bot: false, first_name: "Test" },
+          message_thread_id: 777,
+          forum_topic_closed: {},
+        },
+      }));
+
+      expect(topicSession.service.setSessionName).not.toHaveBeenCalled();
+      expect(api.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it("logs and swallows a Pi session rename failure", async () => {
+      const renameError = new Error("rename failed");
+      const target = { chatId: ALLOWED_CHAT_ID, messageThreadId: 777 };
+      const { bot, api, registry } = setupBot({
+        perContextSessionOverrides: {
+          [makeContextKey(ALLOWED_CHAT_ID, 777)]: {
+            setSessionName: vi.fn(() => {
+              throw renameError;
+            }),
+          },
+        },
+      });
+      await registry.registry.getOrCreate(target);
+      const topicSession = registry.getSession(ALLOWED_CHAT_ID, 777)!;
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await bot.handleUpdate(createTestUpdate({
+        message: {
+          text: undefined,
+          entities: undefined,
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          from: { id: ALLOWED_USER_ID, is_bot: false, first_name: "Test" },
+          message_thread_id: 777,
+          forum_topic_edited: { name: "Project kickoff" },
+        },
+      }));
+
+      expect(topicSession.service.setSessionName).toHaveBeenCalledWith("Project kickoff");
+      expect(consoleError).toHaveBeenCalledWith(
+        "Failed to rename Pi session from Telegram forum topic:",
+        "rename failed",
+        "456::777",
+      );
+      expect(api.sendMessage).not.toHaveBeenCalled();
+      consoleError.mockRestore();
+    });
   });
 
   it.each(["/start", "/commands", "/sessions", "/new", "/model"])(
