@@ -17,6 +17,7 @@ import {
   renderPromptFailure,
   renderSessionInfoHTML,
   renderSessionInfoPlain,
+  renderSessionExchangePreview,
   renderToolEndMessage,
   renderToolStartMessage,
   renderVoiceSupportHTML,
@@ -109,6 +110,27 @@ describe("bot message rendering helpers", () => {
       "read", 1,
     ], ["bash", 2]]))).toBe("🔧 3 tools used: bash ×2, read");
     expect(formatToolSummaryLine(new Map())).toBe("");
+  });
+
+  it("renders an escaped resumed-session exchange preview", () => {
+    const rendered = renderSessionExchangePreview({
+      userText: "Use <auth> & tests",
+      assistantText: "Done <success>",
+    });
+
+    expect(rendered.fallbackText).toBe([
+      "↩️ Recent context",
+      "",
+      "You",
+      "Use <auth> & tests",
+      "",
+      "Pi",
+      "Done <success>",
+    ].join("\n"));
+    expect(rendered.text).toContain("<b>↩️ Recent context</b>");
+    expect(rendered.text).toContain("<b>You</b>");
+    expect(rendered.text).toContain("Use &lt;auth&gt; &amp; tests");
+    expect(rendered.text).toContain("<b>Pi</b>");
   });
 
   it("renders prompt and extension failures consistently", () => {

@@ -1,6 +1,7 @@
 import { toFriendlyError } from "../errors.js";
 import { escapeHTML, formatTelegramHTML } from "../format.js";
 import type { PiSessionDiagnostic, PiSessionInfo } from "../pi-session.js";
+import type { PiSessionExchangePreview } from "../session-exchange-preview.js";
 
 export type TelegramParseMode = "HTML";
 export type TelegramDelivery = "rich-markdown";
@@ -15,6 +16,34 @@ export type RenderedText = {
 export type RenderedChunk = RenderedText & {
   sourceText: string;
 };
+
+export function renderSessionExchangePreview(
+  preview: PiSessionExchangePreview,
+): RenderedText {
+  const fallbackText = [
+    "↩️ Recent context",
+    "",
+    "You",
+    preview.userText,
+    "",
+    "Pi",
+    preview.assistantText,
+  ].join("\n");
+
+  return {
+    text: [
+      "<b>↩️ Recent context</b>",
+      "",
+      "<b>You</b>",
+      escapeHTML(preview.userText),
+      "",
+      "<b>Pi</b>",
+      escapeHTML(preview.assistantText),
+    ].join("\n"),
+    fallbackText,
+    parseMode: "HTML",
+  };
+}
 
 export const TELEGRAM_MESSAGE_LIMIT = 4000;
 export const TELEGRAM_RICH_MESSAGE_LIMIT = 32768;
