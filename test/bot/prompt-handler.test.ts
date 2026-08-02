@@ -10,6 +10,60 @@ function createExtensionDialogs() {
   };
 }
 
+function createActivityHarness(options: {
+  activityEnabled?: boolean;
+  toolVerbosity?: "none" | "summary" | "errors-only" | "all";
+  onPrompt: (callbacks: any) => void | Promise<void>;
+  sendMessage?: (text: string, messageId: number) => Promise<{ message_id: number }>;
+}) {
+  const sent: Array<{ text: string; fallbackText?: string; messageId: number }> = [];
+  const edits: Array<{ text: string; fallbackText?: string; messageId: number }> = [];
+  let callbacks: any;
+  let nextMessageId = 0;
+  const fakePiSession = {
+    bindExtensions: vi.fn().mockResolvedValue(undefined),
+    subscribe(nextCallbacks: any) {
+      callbacks = nextCallbacks;
+      return vi.fn();
+    },
+    prompt: vi.fn(async () => {
+      await options.onPrompt(callbacks);
+    }),
+  };
+  const handler = createPromptHandler({
+    bot: { api: {
+      sendChatAction: vi.fn().mockResolvedValue(undefined),
+      sendMessage(_chatId: number, text: string, sendOptions?: { fallbackText?: string }) {
+        const messageId = ++nextMessageId;
+        sent.push({ text, fallbackText: sendOptions?.fallbackText, messageId });
+        return options.sendMessage?.(text, messageId) ?? Promise.resolve({ message_id: messageId });
+      },
+      editMessageText(_chatId: number, messageId: number, text: string, editOptions?: { fallbackText?: string }) {
+        edits.push({ text, fallbackText: editOptions?.fallbackText, messageId });
+        return Promise.resolve();
+      },
+      editMessageReplyMarkup: vi.fn().mockResolvedValue(undefined),
+    } } as any,
+    toolVerbosity: options.toolVerbosity ?? "summary",
+    isActivityEnabled: () => options.activityEnabled ?? true,
+    editDebounceMs: 0,
+    typingIntervalMs: 60000,
+    isBusy: () => false,
+    taskRunner: { tryStartPrompt(_target, _promptText, task) { void task(); return "started"; } },
+    ensureActiveSession: vi.fn().mockResolvedValue(fakePiSession),
+    syncChatScopedCommands: vi.fn(),
+    refreshChatScopedCommands: vi.fn(),
+    extensionDialogs: createExtensionDialogs(),
+    sendBusyReply: vi.fn(),
+  });
+
+  return {
+    sent,
+    edits,
+    run: () => (handler as any)({} as any, { chatId: 123 }, "prompt", undefined, undefined, { waitForCompletion: true }),
+  };
+}
+
 describe("prompt handler", () => {
   it("waits for completion when requested", async () => {
     let releasePrompt!: () => void;
@@ -299,5 +353,103 @@ describe("prompt handler", () => {
     expect(sentMessages[0]?.text).toMatch(/Working/i);
     expect(editedTexts.some((edit) => edit.text.includes("Hello from Pi"))).toBe(true);
     expect(replyMarkupEdits.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("streams activity separately from the final response", async () => {
+    const harness = createActivityHarness({
+      onPrompt: (callbacks) => {
+        callbacks.onThinkingDelta({ blockKey: "1:0", delta: "Inspect files" });
+        callbacks.onToolStart("read", "tool-1", { path: "src/a.ts" });
+        callbacks.onToolEnd("tool-1", false);
+        callbacks.onTextDelta("Final answer");
+        callbacks.onAgentEnd();
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+
+    const activity = [...harness.sent, ...harness.edits]
+      .filter((message) => message.text.includes("Thinking") || message.text.includes("Read"));
+    expect(activity.map((message) => message.text).join("\n")).toContain("Thinking");
+    expect(activity.map((message) => message.text).join("\n")).toContain("Inspect files");
+    expect(activity.map((message) => message.text).join("\n")).toContain("src/a.ts");
+    expect(activity.map((message) => message.text).join("\n")).toContain("✓");
+    const finalResponse = harness.edits.find((message) => message.text.includes("Final answer"));
+    expect(finalResponse).toBeDefined();
+    expect(activity.some((message) => message.messageId === finalResponse?.messageId)).toBe(false);
+    expect(finalResponse?.text).not.toContain("read ×1");
+  });
+
+  it("preserves legacy summary output when activity is disabled", async () => {
+    const harness = createActivityHarness({
+      activityEnabled: false,
+      onPrompt: (callbacks) => {
+        callbacks.onThinkingDelta({ blockKey: "1:0", delta: "hidden thinking" });
+        callbacks.onToolStart("read", "tool-1", { path: "src/a.ts" });
+        callbacks.onTextDelta("Final answer");
+        callbacks.onAgentEnd();
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+
+    const delivered = [...harness.sent, ...harness.edits].map((message) => message.text).join("\n");
+    expect(delivered).not.toContain("hidden thinking");
+    expect(delivered).toContain("read");
+  });
+
+  it("does not send activity for text-only responses", async () => {
+    const harness = createActivityHarness({
+      onPrompt: (callbacks) => {
+        callbacks.onTextDelta("Final answer");
+        callbacks.onAgentEnd();
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+
+    expect(harness.sent).toHaveLength(1);
+    expect(harness.sent[0]?.text).toMatch(/Working/i);
+  });
+
+  it("isolates a failed activity delivery from the final response", async () => {
+    const harness = createActivityHarness({
+      sendMessage: (text, messageId) => text.includes("Thinking")
+        ? Promise.reject(new Error("activity failed"))
+        : Promise.resolve({ message_id: messageId }),
+      onPrompt: (callbacks) => {
+        callbacks.onThinkingDelta({ blockKey: "1:0", delta: "inspect" });
+        callbacks.onTextDelta("Final answer");
+        callbacks.onAgentEnd();
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+
+    expect(harness.edits.some((message) => message.text.includes("Final answer"))).toBe(true);
+    expect(harness.sent.filter((message) => message.text.includes("Thinking"))).toHaveLength(1);
+  });
+
+  it("rolls over activity chunks and updates a tool in an earlier chunk", async () => {
+    const thinking = "a".repeat(4_100);
+    const harness = createActivityHarness({
+      onPrompt: async (callbacks) => {
+        callbacks.onThinkingDelta({ blockKey: "1:0", delta: thinking });
+        callbacks.onToolStart("read", "tool-1", { path: "src/a.ts" });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        callbacks.onToolEnd("tool-1", false);
+        callbacks.onAgentEnd();
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+
+    const activitySends = harness.sent.filter((message) => message.text.includes("Thinking") || message.text.includes("Read"));
+    expect(activitySends).toHaveLength(2);
+    expect([...harness.sent, ...harness.edits].every((message) => message.text.length <= 4_000)).toBe(true);
+    expect(harness.edits.some((message) => message.text.includes("✓") && message.text.includes("Read"))).toBe(true);
+    const recoveredThinking = activitySends.map((message) => message.text).join("")
+      .replace(/<b>🧠 Thinking(?: \(continued\))?<\/b>\n/g, "");
+    expect(recoveredThinking).toContain(thinking);
   });
 });

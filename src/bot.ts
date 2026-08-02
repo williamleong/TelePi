@@ -623,6 +623,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   const handleUserPrompt = createPromptHandler({
     bot,
     toolVerbosity: config.toolVerbosity,
+    isActivityEnabled: (target) => chatState.isActivityEnabled(target),
     editDebounceMs: EDIT_DEBOUNCE_MS,
     typingIntervalMs: TYPING_INTERVAL_MS,
     isBusy,

@@ -22,6 +22,10 @@ import {
   type RenderedText,
 } from "./message-rendering.js";
 import {
+  createActivityTranscript,
+  renderActivityTranscript,
+} from "./activity-rendering.js";
+import {
   safeEditMessage,
   safeReply,
   sendChatAction,
@@ -49,6 +53,7 @@ export type HandleUserPrompt = (
 interface CreatePromptHandlerOptions {
   bot: Bot<Context>;
   toolVerbosity: ToolVerbosity;
+  isActivityEnabled: (target: PiSessionContext) => boolean;
   editDebounceMs: number;
   typingIntervalMs: number;
   isBusy: (target: PiSessionContext) => boolean;
@@ -94,6 +99,8 @@ async function runPromptFlow(
     renameForumTopicToSessionName,
   } = deps;
 
+  const activityEnabled = deps.isActivityEnabled?.(target) ?? true;
+  const activityTranscript = activityEnabled ? createActivityTranscript() : undefined;
   const abortKeyboard = new InlineKeyboard().text("⏹ Abort", "pi_abort");
   const toolStates = new Map<string, ToolState>();
   const toolCounts = new Map<string, number>();
@@ -106,6 +113,17 @@ async function runPromptFlow(
   let isFlushing = false;
   let flushPending = false;
   let finalized = false;
+  let finalizationPromise: Promise<void> | undefined;
+  let activityMessageIds: number[] = [];
+  let lastActivityChunks: RenderedChunk[] = [];
+  let activityFlushTimer: NodeJS.Timeout | undefined;
+  let activityDeliveryFailed = false;
+  let activityFlushInProgress = false;
+  let activityFlushPending = false;
+  let activityFlushPromise: Promise<void> | undefined;
+  let activityFinalizationPromise: Promise<void> | undefined;
+  let activityFinalized = false;
+  let lastActivityFlushAt = 0;
   let typingStopped = false;
 
   const typingInterval = setInterval(() => {
@@ -128,13 +146,20 @@ async function runPromptFlow(
     }
   };
 
+  const clearActivityFlushTimer = (): void => {
+    if (activityFlushTimer) {
+      clearTimeout(activityFlushTimer);
+      activityFlushTimer = undefined;
+    }
+  };
+
   const renderPreview = (): RenderedChunk => {
     const previewText = buildStreamingPreview(accumulatedText);
     return renderMarkdownChunkWithinLimit(previewText);
   };
 
   const buildFinalResponseText = (text: string): string => {
-    if (toolVerbosity !== "summary") {
+    if (activityEnabled || toolVerbosity !== "summary") {
       return text.trim();
     }
 
@@ -268,6 +293,96 @@ async function runPromptFlow(
     }, delay);
   };
 
+  const scheduleActivityFlush = (): void => {
+    if (!activityTranscript || activityDeliveryFailed || activityFinalized || activityFlushTimer) {
+      return;
+    }
+
+    const delay = Math.max(0, editDebounceMs - (Date.now() - lastActivityFlushAt));
+    activityFlushTimer = setTimeout(() => {
+      activityFlushTimer = undefined;
+      activityFlushPromise = flushActivity();
+      void activityFlushPromise.catch(() => {});
+    }, delay);
+  };
+
+  const flushActivity = async (force = false): Promise<void> => {
+    if (!activityTranscript || activityDeliveryFailed || activityTranscript.entries.length === 0) {
+      return;
+    }
+    if (activityFlushInProgress) {
+      activityFlushPending = true;
+      return;
+    }
+
+    const now = Date.now();
+    if (!force && now - lastActivityFlushAt < editDebounceMs) {
+      scheduleActivityFlush();
+      return;
+    }
+
+    activityFlushInProgress = true;
+    try {
+      const chunks = renderActivityTranscript(activityTranscript);
+      for (const [index, chunk] of chunks.entries()) {
+        const messageId = activityMessageIds[index];
+        const previousChunk = lastActivityChunks[index];
+        if (messageId === undefined) {
+          const message = await sendTextMessage(bot.api, target, chunk.text, {
+            parseMode: chunk.parseMode,
+            fallbackText: chunk.fallbackText,
+            delivery: chunk.delivery,
+          });
+          activityMessageIds[index] = message.message_id;
+          continue;
+        }
+        if (previousChunk?.text === chunk.text && previousChunk?.fallbackText === chunk.fallbackText) {
+          continue;
+        }
+        await safeEditMessage(bot, target, messageId, chunk.text, {
+          parseMode: chunk.parseMode,
+          fallbackText: chunk.fallbackText,
+          delivery: chunk.delivery,
+        });
+      }
+      lastActivityChunks = chunks;
+      lastActivityFlushAt = Date.now();
+    } catch (error) {
+      console.error("Failed to update Telegram activity transcript", error);
+      activityDeliveryFailed = true;
+      clearActivityFlushTimer();
+    } finally {
+      activityFlushInProgress = false;
+      if (activityFlushPending && !activityDeliveryFailed && !activityFinalized) {
+        activityFlushPending = false;
+        scheduleActivityFlush();
+      }
+    }
+  };
+
+  const finalizeActivity = async (): Promise<void> => {
+    if (activityFinalizationPromise) {
+      await activityFinalizationPromise;
+      return;
+    }
+
+    activityFinalizationPromise = (async () => {
+      clearActivityFlushTimer();
+      if (activityFlushInProgress) {
+        activityFlushPending = true;
+        await activityFlushPromise;
+      }
+      activityFlushPromise = flushActivity(true);
+      await activityFlushPromise;
+      clearActivityFlushTimer();
+      activityFlushPromise = flushActivity(true);
+      await activityFlushPromise;
+      activityFinalized = true;
+    })();
+
+    await activityFinalizationPromise;
+  };
+
   const removeAbortKeyboard = async (): Promise<void> => {
     if (!responseMessageId) {
       return;
@@ -316,39 +431,45 @@ async function runPromptFlow(
   };
 
   const finalizeResponse = async (): Promise<void> => {
-    if (finalized) {
-      return;
-    }
-    finalized = true;
-
-    stopTyping();
-    clearFlushTimer();
-    if (responseMessagePromise) {
-      try {
-        await responseMessagePromise;
-      } catch {
-        // If the initial send failed, we will fall back to sending the final response below.
-      }
-    }
-
-    const finalText = buildFinalResponseText(accumulatedText);
-    if (!finalText) {
-      const html = "<b>✅ Done</b>";
-      const plainText = "✅ Done";
-
-      if (responseMessageId) {
-        await safeEditMessage(bot, target, responseMessageId, html, { fallbackText: plainText });
-        await removeAbortKeyboard();
-      } else {
-        await safeReply(ctx, html, { fallbackText: plainText }, target);
-      }
+    if (finalizationPromise) {
+      await finalizationPromise;
       return;
     }
 
-    const chunks = isRichMarkdownCandidate(finalText)
-      ? splitRichMarkdownForTelegram(finalText)
-      : splitMarkdownForTelegram(finalText);
-    await deliverRenderedChunks(chunks);
+    finalizationPromise = (async () => {
+      finalized = true;
+      stopTyping();
+      clearFlushTimer();
+      await finalizeActivity();
+      if (responseMessagePromise) {
+        try {
+          await responseMessagePromise;
+        } catch {
+          // If the initial send failed, we will fall back to sending the final response below.
+        }
+      }
+
+      const finalText = buildFinalResponseText(accumulatedText);
+      if (!finalText) {
+        const html = "<b>✅ Done</b>";
+        const plainText = "✅ Done";
+
+        if (responseMessageId) {
+          await safeEditMessage(bot, target, responseMessageId, html, { fallbackText: plainText });
+          await removeAbortKeyboard();
+        } else {
+          await safeReply(ctx, html, { fallbackText: plainText }, target);
+        }
+        return;
+      }
+
+      const chunks = isRichMarkdownCandidate(finalText)
+        ? splitRichMarkdownForTelegram(finalText)
+        : splitMarkdownForTelegram(finalText);
+      await deliverRenderedChunks(chunks);
+    })();
+
+    await finalizationPromise;
   };
 
   let piSession: PiSessionService | undefined;
@@ -436,8 +557,20 @@ async function runPromptFlow(
 
       scheduleFlush();
     },
-    onThinkingDelta: () => {},
-    onToolStart: (toolName, toolCallId) => {
+    onThinkingDelta: (event) => {
+      if (!activityTranscript) {
+        return;
+      }
+      activityTranscript.appendThinking(event);
+      scheduleActivityFlush();
+    },
+    onToolStart: (toolName, toolCallId, args) => {
+      if (activityTranscript) {
+        activityTranscript.startTool(toolCallId, toolName, args);
+        scheduleActivityFlush();
+        return;
+      }
+
       if (toolVerbosity === "summary") {
         toolCounts.set(toolName, (toolCounts.get(toolName) ?? 0) + 1);
         return;
@@ -476,7 +609,7 @@ async function runPromptFlow(
       });
     },
     onToolUpdate: (toolCallId, partialResult) => {
-      if (toolVerbosity === "none" || toolVerbosity === "summary") {
+      if (activityTranscript || toolVerbosity === "none" || toolVerbosity === "summary") {
         return;
       }
 
@@ -488,6 +621,12 @@ async function runPromptFlow(
       state.partialResult = appendWithCap(state.partialResult, partialResult, TOOL_OUTPUT_PREVIEW_LIMIT);
     },
     onToolEnd: (toolCallId, isError) => {
+      if (activityTranscript) {
+        activityTranscript.finishTool(toolCallId, isError);
+        scheduleActivityFlush();
+        return;
+      }
+
       if (toolVerbosity === "none" || toolVerbosity === "summary") {
         return;
       }
@@ -551,6 +690,7 @@ async function runPromptFlow(
   } catch (error) {
     stopTyping();
     clearFlushTimer();
+    await finalizeActivity();
     if (responseMessagePromise) {
       try {
         await responseMessagePromise;
@@ -576,6 +716,7 @@ async function runPromptFlow(
   } finally {
     stopTyping();
     clearFlushTimer();
+    clearActivityFlushTimer();
     unsubscribe();
   }
 }

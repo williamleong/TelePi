@@ -384,7 +384,9 @@ function createMockPiSession(overrides: Partial<PiSessionService> = {}) {
     getCallbacks: () => callbacks,
     getExtensionBindings: () => extensionBindings,
     emitTextDelta: (delta: string) => callbacks?.onTextDelta(delta),
-    emitToolStart: (toolName: string, toolCallId: string) => callbacks?.onToolStart(toolName, toolCallId),
+    emitThinkingDelta: (blockKey: string, delta: string) => callbacks?.onThinkingDelta({ blockKey, delta }),
+    emitToolStart: (toolName: string, toolCallId: string, args: unknown = {}) =>
+      callbacks?.onToolStart(toolName, toolCallId, args),
     emitToolUpdate: (toolCallId: string, partialResult: string) =>
       callbacks?.onToolUpdate(toolCallId, partialResult),
     emitToolEnd: (toolCallId: string, isError: boolean) => callbacks?.onToolEnd(toolCallId, isError),
@@ -924,6 +926,61 @@ describe("createBot", () => {
 
     await bot.handleUpdate(topic("/activity on", 7));
     expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Activity details: on");
+  });
+
+  it("streams activity by default and scopes activity toggles to the current topic", async () => {
+    const { bot, api, registry } = setupBot();
+    const topic = (text: string, messageThreadId: number) => createTestUpdate({
+      message: {
+        text,
+        chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+        message_thread_id: messageThreadId,
+      },
+    });
+    const configurePrompt = async (messageThreadId: number, text: string) => {
+      await registry.registry.getOrCreate({ chatId: ALLOWED_CHAT_ID, messageThreadId });
+      const session = registry.getSession(ALLOWED_CHAT_ID, messageThreadId)!;
+      (session.service.prompt as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        session.emitThinkingDelta("1:0", "Inspect files");
+        session.emitToolStart("read", "tool-1", { path: "src/a.ts" });
+        session.emitToolEnd("tool-1", false);
+        session.emitTextDelta(text);
+        session.emitAgentEnd();
+      });
+    };
+
+    await configurePrompt(7, "topic seven answer");
+    await configurePrompt(8, "topic eight answer");
+    await bot.handleUpdate(topic("/activity off", 7));
+    api.sendMessage.mockClear();
+    api.editMessageText.mockClear();
+
+    await bot.handleUpdate(topic("first", 7));
+    await nextTick();
+    const disabledDelivery = [
+      ...api.sendMessage.mock.calls.map((call) => String(call[1])),
+      ...api.editMessageText.mock.calls.map((call) => String(call[2])),
+    ].join("\n");
+    expect(disabledDelivery).not.toContain("Thinking");
+    expect(disabledDelivery).toContain("read");
+
+    api.sendMessage.mockClear();
+    api.editMessageText.mockClear();
+    await bot.handleUpdate(topic("second", 8));
+    await nextTick();
+    const defaultDelivery = [
+      ...api.sendMessage.mock.calls.map((call) => String(call[1])),
+      ...api.editMessageText.mock.calls.map((call) => String(call[2])),
+    ].join("\n");
+    expect(defaultDelivery).toContain("Thinking");
+    expect(defaultDelivery).toContain("topic eight answer");
+
+    await bot.handleUpdate(topic("/activity on", 7));
+    api.sendMessage.mockClear();
+    api.editMessageText.mockClear();
+    await bot.handleUpdate(topic("third", 7));
+    await nextTick();
+    expect(hasSentOrEditedText(api, "Thinking")).toBe(true);
   });
 
   it("rejects invalid activity arguments without creating a Pi session", async () => {
@@ -2385,6 +2442,9 @@ describe("createBot", () => {
     const { bot, pi, api } = setupBot({
       configOverrides: { toolVerbosity: "all" },
     });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/activity off" } }));
+    api.sendMessage.mockClear();
 
     const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
     promptMock.mockImplementation(async () => {
@@ -4101,6 +4161,8 @@ describe("createBot", () => {
 
   it("summarizes tool usage, reports tool errors, and handles prompt failures", async () => {
     const summary = setupBot();
+    await summary.bot.handleUpdate(createTestUpdate({ message: { text: "/activity off" } }));
+    summary.api.sendMessage.mockClear();
     const summaryPrompt = summary.pi.service.prompt as ReturnType<typeof vi.fn>;
     summaryPrompt.mockImplementation(async () => {
       summary.pi.emitTextDelta("Finished response");
@@ -4117,6 +4179,8 @@ describe("createBot", () => {
     const errorsOnly = setupBot({
       configOverrides: { toolVerbosity: "errors-only" },
     });
+    await errorsOnly.bot.handleUpdate(createTestUpdate({ message: { text: "/activity off" } }));
+    errorsOnly.api.sendMessage.mockClear();
     const errorsOnlyPrompt = errorsOnly.pi.service.prompt as ReturnType<typeof vi.fn>;
     errorsOnlyPrompt.mockImplementation(async () => {
       errorsOnly.pi.emitTextDelta("Answer");
