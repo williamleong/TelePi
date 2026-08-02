@@ -137,6 +137,8 @@ async function runPromptFlow(
   const abortOwnerMessageIds = new Set<number>();
   let workingMessageId: number | undefined;
   let workingMessagePromise: Promise<void> | undefined;
+  let workingMessageRemovalPromise: Promise<void> | undefined;
+  let workingMessageRemoved = false;
   let workingMessageAdopted = false;
   let deliveryTimer: NodeJS.Timeout | undefined;
   let deliveryWorkerPromise: Promise<void> | undefined;
@@ -240,8 +242,36 @@ async function runPromptFlow(
     }
   };
 
+  const removeWorkingMessage = async (): Promise<void> => {
+    if (workingMessageRemoved || workingMessageAdopted) {
+      return;
+    }
+    if (workingMessageRemovalPromise) {
+      return workingMessageRemovalPromise;
+    }
+    if (workingMessageId === undefined) {
+      return;
+    }
+
+    const messageId = workingMessageId;
+    workingMessageRemoved = true;
+    abortOwnerMessageIds.delete(messageId);
+    if (abortOwnerMessageId === messageId) {
+      abortOwnerMessageId = undefined;
+    }
+    workingMessageRemovalPromise = (async () => {
+      try {
+        await bot.api.deleteMessage(target.chatId, messageId);
+      } catch (error) {
+        console.error("Failed to delete Telegram working message", error);
+      }
+    })();
+    return workingMessageRemovalPromise;
+  };
+
   const adoptWorkingMessage = async (rendered: RenderedText): Promise<number | undefined> => {
-    if (workingMessageId === undefined || workingMessageAdopted) {
+    await workingMessageRemovalPromise;
+    if (workingMessageId === undefined || workingMessageRemoved || workingMessageAdopted) {
       return undefined;
     }
 
@@ -546,22 +576,6 @@ async function runPromptFlow(
     lastAssistant.revision += 1;
   };
 
-  const deleteUnusedWorkingMessage = async (): Promise<void> => {
-    if (workingMessageId === undefined || workingMessageAdopted) {
-      return;
-    }
-
-    try {
-      await bot.api.deleteMessage(target.chatId, workingMessageId);
-      abortOwnerMessageIds.delete(workingMessageId);
-      if (abortOwnerMessageId === workingMessageId) {
-        abortOwnerMessageId = undefined;
-      }
-    } catch (error) {
-      console.error("Failed to delete Telegram working message", error);
-    }
-  };
-
   const finalizeSuccess = async (): Promise<void> => {
     if (finalizationPromise) {
       return finalizationPromise;
@@ -571,7 +585,7 @@ async function runPromptFlow(
       deliveryFinalizing = true;
       appendToolSummary();
       await drainDelivery();
-      await deleteUnusedWorkingMessage();
+      await removeWorkingMessage();
       await cleanupAbortOwners();
       deliveryFinalized = true;
       stopTyping();
@@ -587,9 +601,10 @@ async function runPromptFlow(
     failureFinalizationPromise = (async () => {
       deliveryFinalizing = true;
       await drainDeliveryAfterFailure();
+      await workingMessageRemovalPromise;
       const status = renderPromptFailure("", error);
       try {
-        if (workingMessageId !== undefined && !workingMessageAdopted) {
+        if (workingMessageId !== undefined && !workingMessageRemoved && !workingMessageAdopted) {
           await safeEditMessage(bot, target, workingMessageId, status, {
             fallbackText: status,
             replyMarkup: abortKeyboard,
@@ -661,9 +676,24 @@ async function runPromptFlow(
           console.error("Failed to send extension notification", error);
         });
       },
-      select: (title, choices, dialogOptions) => extensionDialogs.openSelect(target, title, choices, dialogOptions),
-      confirm: (title, message, dialogOptions) => extensionDialogs.openConfirm(target, title, message, dialogOptions),
-      input: (title, placeholder, dialogOptions) => extensionDialogs.openInput(target, title, placeholder, dialogOptions),
+      select: async (title, choices, dialogOptions) => {
+        if (dialogBackedToolCallIds.size > 0) {
+          await removeWorkingMessage();
+        }
+        return extensionDialogs.openSelect(target, title, choices, dialogOptions);
+      },
+      confirm: async (title, message, dialogOptions) => {
+        if (dialogBackedToolCallIds.size > 0) {
+          await removeWorkingMessage();
+        }
+        return extensionDialogs.openConfirm(target, title, message, dialogOptions);
+      },
+      input: async (title, placeholder, dialogOptions) => {
+        if (dialogBackedToolCallIds.size > 0) {
+          await removeWorkingMessage();
+        }
+        return extensionDialogs.openInput(target, title, placeholder, dialogOptions);
+      },
     }),
     onError: (error) => {
       const rendered = renderExtensionError(error.extensionPath, error.event, error.error);
@@ -691,6 +721,7 @@ async function runPromptFlow(
     onToolStart: (toolName, toolCallId, args) => {
       if (isDialogBackedTool(toolName)) {
         dialogBackedToolCallIds.add(toolCallId);
+        void removeWorkingMessage();
         return;
       }
       if (activityEnabled) {
