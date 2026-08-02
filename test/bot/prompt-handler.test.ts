@@ -7,6 +7,7 @@ type TelegramOperation =
   | { kind: "send"; messageId: number; text: string; hasAbort: boolean; delivery: "plain" | "rich" }
   | { kind: "edit"; messageId: number; text: string; hasAbort: boolean; delivery: "plain" | "rich" }
   | { kind: "markup"; messageId: number; hasAbort: boolean }
+  | { kind: "delete"; messageId: number }
   | { kind: "typing" };
 
 type Deferred<T> = {
@@ -71,6 +72,7 @@ function createPromptHarness(options: {
   onPrompt?: (callbacks: PiSessionCallbacks) => void | Promise<void>;
   promptError?: Error;
   bindExtensionsError?: Error;
+  onBindExtensions?: () => Promise<void> | void;
   subscribeError?: Error;
   ensureActiveSession?: () => Promise<unknown>;
   onSend?: (text: string, messageId: number) => Promise<void> | void;
@@ -130,9 +132,12 @@ function createPromptHarness(options: {
   };
 
   const fakePiSession = {
-    bindExtensions: options.bindExtensionsError
-      ? vi.fn().mockRejectedValue(options.bindExtensionsError)
-      : vi.fn().mockResolvedValue(undefined),
+    bindExtensions: vi.fn(async () => {
+      if (options.bindExtensionsError) {
+        throw options.bindExtensionsError;
+      }
+      await options.onBindExtensions?.();
+    }),
     subscribe(nextCallbacks: PiSessionCallbacks) {
       if (options.subscribeError) {
         throw options.subscribeError;
@@ -193,6 +198,10 @@ function createPromptHarness(options: {
         await options.onMarkup?.(messageId, hasAbort);
         record({ kind: "markup", messageId, hasAbort });
       },
+      async deleteMessage(_chatId: number, messageId: number) {
+        record({ kind: "delete", messageId });
+        return true;
+      },
   };
 
   const taskRunner = {
@@ -236,6 +245,7 @@ function createPromptHarness(options: {
     trySteer,
     taskRunner,
     sendBusyReply,
+    prompt: fakePiSession.prompt,
     task: () => taskPromise,
     waitForOperation,
     run: (waitForCompletion = true) => handler(
@@ -313,7 +323,7 @@ describe("prompt handler", () => {
     await expect(harness.run(false)).resolves.toBe(true);
     const callbacks = await promptStarted.promise;
     callbacks.onTextDelta("original output");
-    await harness.waitForOperation((operation) => operation.kind === "send" && operation.text.includes("original output"));
+    await harness.waitForOperation((operation) => operation.kind === "edit" && operation.messageId === 1 && operation.text.includes("original output"));
 
     await expect(harness.runInput({ text: "focus on the tests", waitForCompletion: false })).resolves.toBe(true);
     callbacks.onTextDelta(" after steering");
@@ -429,14 +439,17 @@ describe("prompt handler", () => {
 
       callbacks.onAgentEnd();
       await vi.advanceTimersByTimeAsync(0);
-      expect(harness.operations.filter(
-        (operation) => (operation.kind === "send" || operation.kind === "edit") && /Working|Done/i.test(operation.text),
-      )).toEqual([]);
+      expect(harness.operations).toContainEqual(expect.objectContaining({
+        kind: "send",
+        messageId: 1,
+        text: expect.stringMatching(/Working/i),
+        hasAbort: true,
+      }));
 
       callbacks.onThinkingDelta({ blockKey: "late-thinking", delta: "late thought" });
       await vi.advanceTimersByTimeAsync(0);
       await harness.waitForOperation(
-        (operation) => operation.kind === "send" && operation.messageId === 1 && operation.text.includes("late thought"),
+        (operation) => operation.kind === "edit" && operation.messageId === 1 && operation.text.includes("late thought"),
       );
 
       callbacks.onTextDelta("late answer");
@@ -451,9 +464,11 @@ describe("prompt handler", () => {
 
       promptRelease.resolve();
       await expect(result).resolves.toBe(true);
-      expect(harness.operations.filter(
-        (operation) => (operation.kind === "send" || operation.kind === "edit") && /Working|Done/i.test(operation.text),
-      )).toEqual([]);
+      expect(harness.operations).toContainEqual(expect.objectContaining({
+        kind: "edit",
+        messageId: 1,
+        text: expect.stringContaining("late thought"),
+      }));
     } finally {
       promptRelease.resolve();
       vi.useRealTimers();
@@ -474,18 +489,213 @@ describe("prompt handler", () => {
     await harness.task();
   });
 
-  it("preserves chronological activity-first output without a status message", async () => {
+  it("keeps Abort hidden until extension binding succeeds, then publishes it before prompting", async () => {
+    const bindingStarted = deferred();
+    const bindingRelease = deferred();
+    const promptRelease = deferred();
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onBindExtensions: async () => {
+        bindingStarted.resolve();
+        await bindingRelease.promise;
+      },
+      onPrompt: async () => {
+        expect(harness.operations).toContainEqual(expect.objectContaining({
+          kind: "send",
+          messageId: 1,
+          text: expect.stringMatching(/Working/i),
+          hasAbort: true,
+        }));
+        promptRelease.resolve();
+      },
+    });
+
+    await expect(harness.run(false)).resolves.toBe(true);
+    await bindingStarted.promise;
+    expect(harness.operations).not.toContainEqual(expect.objectContaining({
+      kind: "send",
+      text: expect.stringMatching(/Working/i),
+      hasAbort: true,
+    }));
+    expect(harness.prompt).not.toHaveBeenCalled();
+    expect(harness.operations).toContainEqual(expect.objectContaining({ kind: "typing" }));
+
+    bindingRelease.resolve();
+    await harness.task();
+    expect(harness.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows Abort while a prompt has no visible output", async () => {
+    const promptRelease = deferred();
+    const promptStarted = deferred();
+    const harness = createPromptHarness({
+      onPrompt: async () => {
+        promptStarted.resolve();
+        await promptRelease.promise;
+      },
+    });
+
+    const result = harness.run();
+    await promptStarted.promise;
+
+    expect(harness.operations).toContainEqual(expect.objectContaining({
+      kind: "send",
+      messageId: 1,
+      text: expect.stringMatching(/Working/i),
+      hasAbort: true,
+    }));
+
+    promptRelease.resolve();
+    await expect(result).resolves.toBe(true);
+  });
+
+  it("edits the working message into the first Agent activity", async () => {
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onPrompt: async (callbacks) => {
+        callbacks.onToolStart("Agent", "agent-1", { description: "Inspect code" });
+        await harness.waitForOperation(
+          (operation) => operation.kind === "edit"
+            && operation.messageId === 1
+            && operation.text.includes("Agent"),
+        );
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(harness.operations).toContainEqual(expect.objectContaining({
+      kind: "edit",
+      messageId: 1,
+      hasAbort: true,
+    }));
+    expect(harness.operations.filter((operation) => operation.kind === "send")).toHaveLength(1);
+  });
+
+  it("edits the working message into the first assistant output when activity is disabled", async () => {
+    const harness = createPromptHarness({
+      activityEnabled: false,
+      onPrompt: (callbacks) => callbacks.onTextDelta("answer"),
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(harness.operations).toContainEqual(expect.objectContaining({
+      kind: "edit",
+      messageId: 1,
+      text: expect.stringContaining("answer"),
+      hasAbort: true,
+    }));
+  });
+
+  it("adopts the working message for the first chunk and migrates Abort on rollover", async () => {
+    const harness = createPromptHarness({
+      onPrompt: (callbacks) => callbacks.onThinkingDelta({ blockKey: "1", delta: "x".repeat(4_100) }),
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(harness.operations).toContainEqual(expect.objectContaining({ kind: "edit", messageId: 1, hasAbort: true }));
+    expect(harness.operations).toContainEqual(expect.objectContaining({ kind: "send", messageId: 2 }));
+    expect(harness.operations).toContainEqual(expect.objectContaining({ kind: "markup", messageId: 2, hasAbort: true }));
+    expect(harness.operations).toContainEqual(expect.objectContaining({ kind: "markup", messageId: 1, hasAbort: false }));
+  });
+
+  it("deletes an unused working message after silent success", async () => {
+    const harness = createPromptHarness({ onPrompt: () => {} });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(harness.operations).toContainEqual({ kind: "delete", messageId: 1 });
+    expect(harness.operations.filter((operation) => operation.kind === "edit")).toEqual([]);
+  });
+
+  it.each([
+    ["failure", new Error("prompt failed")],
+    ["abort", new Error("Abort requested by user")],
+  ])("edits an unused working message for early %s", async (_name, promptError) => {
+    const harness = createPromptHarness({ promptError });
+
+    await expect(harness.run()).resolves.toBe(false);
+    expect(harness.operations).toContainEqual(expect.objectContaining({
+      kind: "edit",
+      messageId: 1,
+      text: expect.stringMatching(/failed|aborted/i),
+    }));
+    expect(harness.operations.filter((operation) => operation.kind === "send")).toHaveLength(1);
+  });
+
+  it("falls back to first-output Abort ownership when the working message fails", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    let sendCount = 0;
+    const harness = createPromptHarness({
+      onSend: () => {
+        sendCount += 1;
+        if (sendCount === 1) {
+          throw new Error("working send failed");
+        }
+      },
+      onPrompt: (callbacks) => callbacks.onTextDelta("answer"),
+    });
+
+    try {
+      await expect(harness.run()).resolves.toBe(true);
+      expect(harness.operations).toContainEqual(expect.objectContaining({
+        kind: "send",
+        messageId: 2,
+        text: expect.stringContaining("answer"),
+        hasAbort: true,
+      }));
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it.each(["all", "errors-only"] as const)(
+    "puts Abort on the initial activity-off %s tool output when Working delivery fails",
+    async (toolVerbosity) => {
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      let sendCount = 0;
+      let harness!: ReturnType<typeof createPromptHarness>;
+      harness = createPromptHarness({
+        activityEnabled: false,
+        toolVerbosity,
+        onSend: () => {
+          sendCount += 1;
+          if (sendCount === 1) {
+            throw new Error("working send failed");
+          }
+        },
+        onPrompt: (callbacks) => {
+          callbacks.onToolStart("bash", "tool-1", {});
+          callbacks.onToolUpdate("tool-1", "stderr");
+          callbacks.onToolEnd("tool-1", true);
+        },
+      });
+
+      try {
+        await expect(harness.run()).resolves.toBe(true);
+        const toolMessage = harness.operations.find(
+          (operation) => operation.kind === "send"
+            && (toolVerbosity === "all" ? operation.text.includes("Running:") : operation.text.includes("❌")),
+        );
+        expect(toolMessage).toMatchObject({ messageId: 2, hasAbort: true });
+        expect(harness.trackCallbackMessages).toEqual([2]);
+        expect(harness.markupAttempts).not.toContainEqual({ messageId: 2, hasAbort: true });
+      } finally {
+        consoleError.mockRestore();
+      }
+    },
+  );
+
+  it("preserves chronological activity-first output after adopting the working message", async () => {
     let harness!: ReturnType<typeof createPromptHarness>;
     harness = createPromptHarness({
       onPrompt: async (callbacks) => {
         callbacks.onThinkingDelta({ blockKey: "thinking-1", delta: "first thought" });
         await harness.waitForOperation(
-          (operation) => operation.kind === "send" && operation.messageId === 1,
+          (operation) => operation.kind === "edit" && operation.messageId === 1 && operation.text.includes("first thought"),
         );
 
         callbacks.onTextDelta("first answer");
         await harness.waitForOperation(
-          (operation) => operation.kind === "send" && operation.messageId === 2,
+          (operation) => operation.kind === "send" && operation.messageId === 2 && operation.text.includes("first answer"),
         );
 
         callbacks.onTextDelta(" extended");
@@ -495,7 +705,7 @@ describe("prompt handler", () => {
 
         callbacks.onThinkingDelta({ blockKey: "thinking-2", delta: "second thought" });
         await harness.waitForOperation(
-          (operation) => operation.kind === "send" && operation.messageId === 3,
+          (operation) => operation.kind === "send" && operation.messageId === 3 && operation.text.includes("second thought"),
         );
 
         callbacks.onTextDelta("final answer");
@@ -510,15 +720,18 @@ describe("prompt handler", () => {
     );
     expect(outputSends.map((operation) => operation.messageId)).toEqual([1, 2, 3, 4]);
     expect(outputSends.map((operation) => operation.text)).toEqual([
-      expect.stringContaining("first thought"),
+      expect.stringMatching(/Working/i),
       expect.stringContaining("first answer"),
       expect.stringContaining("second thought"),
       expect.stringContaining("final answer"),
     ]);
+    expect(harness.operations).toContainEqual(expect.objectContaining({
+      kind: "edit",
+      messageId: 1,
+      text: expect.stringContaining("first thought"),
+      hasAbort: true,
+    }));
     expect(outputSends[0]).toMatchObject({ hasAbort: true });
-    expect(harness.operations.some(
-      (operation) => (operation.kind === "send" || operation.kind === "edit") && /Working|Done/i.test(operation.text),
-    )).toBe(false);
 
     const adjacentAssistantEdits = harness.operations.filter(
       (operation): operation is Extract<TelegramOperation, { kind: "edit" }> =>
@@ -628,7 +841,7 @@ describe("prompt handler", () => {
 
     await expect(harness.run()).resolves.toBe(true);
     expect(harness.operations).toContainEqual(expect.objectContaining({
-      kind: "send",
+      kind: "edit",
       messageId: 1,
       text: expect.stringContaining("running command"),
     }));
@@ -727,7 +940,7 @@ describe("prompt handler", () => {
     ).at(-1)).toMatchObject({ messageId: 1 });
   });
 
-  it("sends no message for silent success", async () => {
+  it("deletes the working message for silent success", async () => {
     const harness = createPromptHarness({
       onPrompt: (callbacks) => {
         callbacks.onAgentEnd();
@@ -736,7 +949,10 @@ describe("prompt handler", () => {
 
     await expect(harness.run()).resolves.toBe(true);
 
-    expect(harness.operations.filter((operation) => operation.kind === "send" || operation.kind === "edit")).toEqual([]);
+    expect(harness.operations.filter((operation) => operation.kind === "send" || operation.kind === "edit")).toEqual([
+      expect.objectContaining({ kind: "send", messageId: 1, text: expect.stringMatching(/Working/i) }),
+    ]);
+    expect(harness.operations).toContainEqual({ kind: "delete", messageId: 1 });
   });
 
   it("gives the first activity output Abort ownership without a follow-up markup edit", async () => {
@@ -888,7 +1104,7 @@ describe("prompt handler", () => {
       const result = harness.run();
       const callbacks = await promptStarted.promise;
       const typingAfterStart = harness.operations.filter((operation) => operation.kind === "typing").length;
-      expect(typingAfterStart).toBe(1);
+      expect(typingAfterStart).toBe(2);
 
       callbacks.onTextDelta("answer");
       await vi.advanceTimersByTimeAsync(0);
@@ -919,7 +1135,7 @@ describe("prompt handler", () => {
       await expect(harness.run()).resolves.toBe(false);
       expect(harness.operations.filter(
         (operation) => operation.kind === "send" || operation.kind === "edit",
-      )).toHaveLength(1);
+      )).toHaveLength(2);
       const typingAfterSettlement = harness.operations.filter((operation) => operation.kind === "typing").length;
       await vi.advanceTimersByTimeAsync(9_000);
       expect(harness.operations.filter((operation) => operation.kind === "typing")).toHaveLength(typingAfterSettlement);
@@ -953,7 +1169,7 @@ describe("prompt handler", () => {
     const promptStarted = deferred<PiSessionCallbacks>();
     const harness = createPromptHarness({
       editDebounceMs: 10,
-      onSend: async (text, messageId) => {
+      onEdit: async (text, messageId) => {
         if (messageId === 1 && text.includes("first activity")) {
           firstSegmentStarted.resolve();
           await firstSegmentSend.promise;
@@ -1003,7 +1219,7 @@ describe("prompt handler", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const activitySendAttempted = deferred();
     const harness = createPromptHarness({
-      onSend: (text, messageId) => {
+      onEdit: (text, messageId) => {
         if (messageId === 1 && text.includes("activity")) {
           activitySendAttempted.resolve();
           return Promise.reject(new Error("activity delivery failed"));
@@ -1020,7 +1236,7 @@ describe("prompt handler", () => {
     try {
       await expect(harness.run()).resolves.toBe(false);
       expect(harness.operations).toContainEqual(
-        expect.objectContaining({ kind: "send", messageId: 2, text: expect.stringContaining("assistant answer") }),
+        expect.objectContaining({ kind: "edit", messageId: 1, text: expect.stringContaining("assistant answer") }),
       );
       expect(harness.operations.filter(
         (operation) => operation.kind === "send" && operation.text.includes("activity delivery failed"),
@@ -1038,7 +1254,7 @@ describe("prompt handler", () => {
       const harness = createPromptHarness({
         activityEnabled: false,
         toolVerbosity,
-        onSend: (text, messageId) => {
+        onEdit: (text, messageId) => {
           if (messageId === 1 && text.includes(toolDeliveryText)) {
             return Promise.reject(new Error("activity-off tool delivery failed"));
           }
@@ -1060,7 +1276,7 @@ describe("prompt handler", () => {
       try {
         await expect(harness.run()).resolves.toBe(false);
         expect(harness.operations).toContainEqual(
-          expect.objectContaining({ kind: "send", messageId: 2, text: expect.stringContaining("assistant answer") }),
+          expect.objectContaining({ kind: "edit", messageId: 1, text: expect.stringContaining("assistant answer") }),
         );
         expect(harness.operations.filter(
           (operation) => operation.kind === "send" && operation.text.includes("activity-off tool delivery failed"),
@@ -1071,10 +1287,10 @@ describe("prompt handler", () => {
     },
   );
 
-  it("shows a standalone prompt failure after an assistant delivery failure", async () => {
+  it("edits the working message with an assistant delivery failure", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const harness = createPromptHarness({
-      onSend: (text, messageId) => {
+      onEdit: (text, messageId) => {
         if (messageId === 1 && text.includes("assistant answer")) {
           return Promise.reject(new Error("assistant delivery failed"));
         }
@@ -1087,9 +1303,11 @@ describe("prompt handler", () => {
 
     try {
       await expect(harness.run()).resolves.toBe(false);
-      expect(harness.operations.filter(
-        (operation) => operation.kind === "send" && operation.text.includes("assistant delivery failed"),
-      )).toHaveLength(1);
+      expect(harness.operations).toContainEqual(expect.objectContaining({
+        kind: "edit",
+        messageId: 1,
+        text: expect.stringContaining("assistant delivery failed"),
+      }));
       expect(harness.operations.filter(
         (operation) => operation.kind === "send" || operation.kind === "edit",
       )).toHaveLength(2);
@@ -1112,7 +1330,7 @@ describe("prompt handler", () => {
     try {
       expect(await settlesWithinMicrotasks(harness.run())).toEqual({ settled: true, value: true, error: undefined });
       expect(harness.operations).toContainEqual(
-        expect.objectContaining({ kind: "send", messageId: 1, text: expect.stringContaining("🔧 1 tool used: read"), hasAbort: true }),
+        expect.objectContaining({ kind: "edit", messageId: 1, text: expect.stringContaining("🔧 1 tool used: read"), hasAbort: true }),
       );
       expect(harness.operations).toEqual(expect.arrayContaining([
         expect.objectContaining({ kind: "markup", messageId: 1, hasAbort: false }),
@@ -1123,7 +1341,7 @@ describe("prompt handler", () => {
     }
   });
 
-  it("preserves summary tool verbosity without a status message", async () => {
+  it("preserves summary tool verbosity after adopting the working message", async () => {
     const harness = createPromptHarness({
       activityEnabled: false,
       onPrompt: (callbacks) => {
@@ -1142,7 +1360,7 @@ describe("prompt handler", () => {
     ).map((operation) => operation.text).join("\n");
     expect(outputText).toContain("read");
     expect(outputText).not.toContain("hidden thinking");
-    expect(outputText).not.toMatch(/Working|Done/i);
+    expect(outputText).toContain("Working");
   });
 
   it("preserves onSessionInfoChanged topic synchronization", async () => {
@@ -1193,18 +1411,25 @@ describe("prompt handler", () => {
   it.each([
     ["extension binding", { bindExtensionsError: new Error("bind failed") }],
     ["event subscription", { subscribeError: new Error("subscribe failed") }],
-  ])("finalizes controls and typing when %s rejects", async (_phase, failure) => {
+  ])("reports the failure and finalizes typing when %s rejects before Abort is published", async (_phase, failure) => {
     vi.useFakeTimers();
     const harness = createPromptHarness({ typingIntervalMs: 4_500, ...failure });
 
     try {
       await expect(harness.run()).resolves.toBe(false);
       expect(harness.operations).toEqual(expect.arrayContaining([
-        expect.objectContaining({ kind: "send", messageId: 1, text: expect.stringMatching(/failed/i) }),
+        expect.objectContaining({
+          kind: "send",
+          messageId: 1,
+          text: expect.stringMatching(/bind failed|subscribe failed/),
+          hasAbort: false,
+        }),
       ]));
-      expect(harness.operations.filter(
-        (operation) => operation.kind === "send" || operation.kind === "edit",
-      )).toHaveLength(1);
+      expect(harness.operations).not.toContainEqual(expect.objectContaining({
+        kind: "send",
+        text: expect.stringMatching(/Working/i),
+        hasAbort: true,
+      }));
 
       const typingAfterSettlement = harness.operations.filter((operation) => operation.kind === "typing").length;
       await vi.advanceTimersByTimeAsync(9_000);
@@ -1221,7 +1446,7 @@ describe("prompt handler", () => {
     harness = createPromptHarness({
       activityEnabled: false,
       toolVerbosity: "all",
-      onSend: async (text, messageId) => {
+      onEdit: async (text, messageId) => {
         if (messageId === 1 && text.includes("Running:")) {
           toolStartStarted.resolve();
           await toolStartRelease.promise;
@@ -1251,38 +1476,40 @@ describe("prompt handler", () => {
     toolStartRelease.resolve();
     await expect(result).resolves.toBe(true);
 
+    const workingAbort = harness.operations.findIndex(
+      (operation) => operation.kind === "send" && operation.messageId === 1 && operation.hasAbort,
+    );
     const toolFinish = harness.operations.findIndex(
       (operation) => operation.kind === "edit" && operation.messageId === 1 && operation.text.includes("❌"),
     );
-    const attachToolAbort = harness.operations.findIndex(
-      (operation) => operation.kind === "markup" && operation.messageId === 1 && operation.hasAbort,
-    );
-    const clearToolAbort = harness.operations.findIndex(
+    const clearWorkingAbort = harness.operations.findIndex(
       (operation) => operation.kind === "markup" && operation.messageId === 1 && !operation.hasAbort,
     );
-    expect(toolFinish).toBeGreaterThanOrEqual(0);
-    expect(attachToolAbort).toBeGreaterThanOrEqual(0);
-    expect(clearToolAbort).toBeGreaterThan(toolFinish);
+    expect(workingAbort).toBeGreaterThanOrEqual(0);
+    expect(toolFinish).toBeGreaterThan(workingAbort);
+    expect(clearWorkingAbort).toBeGreaterThan(toolFinish);
   });
 
   it.each(["all", "errors-only"] as const)(
-    "serializes an earlier activity-off %s tool delivery before later assistant text and keeps one Abort owner",
+    "keeps activity-off %s tool output visibly before later assistant text",
     async (toolVerbosity) => {
       const toolDeliveryRelease = deferred();
       const toolDeliveryStarted = deferred();
       const assistantEmitted = deferred();
       const promptRelease = deferred();
       const toolDeliveryText = toolVerbosity === "all" ? "Running:" : "❌";
+      const waitForToolDelivery = async (text: string): Promise<void> => {
+        if (text.includes(toolDeliveryText)) {
+          toolDeliveryStarted.resolve();
+          await toolDeliveryRelease.promise;
+        }
+      };
       let harness!: ReturnType<typeof createPromptHarness>;
       harness = createPromptHarness({
         activityEnabled: false,
         toolVerbosity,
-        onSend: async (text, messageId) => {
-          if (messageId === 1 && text.includes(toolDeliveryText)) {
-            toolDeliveryStarted.resolve();
-            await toolDeliveryRelease.promise;
-          }
-        },
+        onSend: waitForToolDelivery,
+        onEdit: waitForToolDelivery,
         onPrompt: async (callbacks) => {
           callbacks.onToolStart("bash", "tool-1", {});
           callbacks.onToolUpdate("tool-1", "stderr");
@@ -1307,13 +1534,14 @@ describe("prompt handler", () => {
         await assistantEmitted.promise;
         await vi.advanceTimersByTimeAsync(0);
         expect(harness.operations).not.toContainEqual(
-          expect.objectContaining({ kind: "send", messageId: 2, text: expect.stringContaining("later assistant text") }),
+          expect.objectContaining({ text: expect.stringContaining("later assistant text") }),
         );
 
         toolDeliveryRelease.resolve();
         await vi.advanceTimersByTimeAsync(0);
         await harness.waitForOperation(
-          (operation) => operation.kind === "send" && operation.messageId === 2 && operation.text.includes("later assistant text"),
+          (operation) => (operation.kind === "send" || operation.kind === "edit")
+            && operation.text.includes("later assistant text"),
         );
         await harness.waitForOperation(
           (operation) => operation.kind === "markup" && operation.messageId === 2 && operation.hasAbort,
@@ -1321,30 +1549,21 @@ describe("prompt handler", () => {
         await harness.waitForOperation(
           (operation) => operation.kind === "markup" && operation.messageId === 1 && !operation.hasAbort,
         );
-        if (toolVerbosity === "all") {
-          await harness.waitForOperation(
-            (operation) => operation.kind === "edit" && operation.messageId === 1 && operation.text.includes("❌"),
-          );
-        }
-
         const outputOperations = harness.operations.filter(
           (operation): operation is Extract<TelegramOperation, { kind: "send" | "edit" }> =>
             operation.kind === "send" || operation.kind === "edit",
         );
-        expect(outputOperations.map((operation) => [operation.kind, operation.messageId])).toEqual(
-          toolVerbosity === "all"
-            ? [["send", 1], ["send", 2], ["edit", 1]]
-            : [["send", 1], ["send", 2]],
-        );
-        expect(outputOperations[0].text).toContain(toolDeliveryText);
-        expect(outputOperations[1].text).toContain("later assistant text");
-        if (toolVerbosity === "all") {
-          expect(outputOperations[2].text).toContain("❌");
+        const toolOutputs = outputOperations.filter((operation) => operation.text.includes(toolDeliveryText));
+        const assistantOutput = outputOperations.find((operation) => operation.text.includes("later assistant text"));
+        if (!assistantOutput) {
+          throw new Error("Expected later assistant text to be delivered");
         }
 
-        expect(harness.operations.some(
-          (operation) => (operation.kind === "send" || operation.kind === "edit") && /Working|Done/i.test(operation.text),
-        )).toBe(false);
+        expect(toolOutputs).toEqual(expect.arrayContaining([
+          expect.objectContaining({ kind: "edit", messageId: 1 }),
+        ]));
+        expect(assistantOutput).toMatchObject({ kind: "send", messageId: 2 });
+        expect(assistantOutput.messageId).toBeGreaterThan(Math.max(...toolOutputs.map((operation) => operation.messageId)));
         const abortOwners = new Set<number>();
         const ownersAfterMigrations: number[][] = [];
         for (const operation of harness.operations) {
@@ -1365,6 +1584,14 @@ describe("prompt handler", () => {
 
         promptRelease.resolve();
         await expect(result).resolves.toBe(true);
+        expect(harness.operations.filter(
+          (operation): operation is Extract<TelegramOperation, { kind: "send" | "edit" }> =>
+            operation.kind === "send" || operation.kind === "edit",
+        ).map((operation) => [operation.kind, operation.messageId])).toEqual(
+          toolVerbosity === "all"
+            ? [["send", 1], ["edit", 1], ["send", 2], ["edit", 1]]
+            : [["send", 1], ["edit", 1], ["send", 2]],
+        );
         for (const operation of harness.operations) {
           if (operation.kind === "markup" && !operation.hasAbort) {
             abortOwners.delete(operation.messageId);
@@ -1387,7 +1614,7 @@ describe("prompt handler", () => {
     harness = createPromptHarness({
       activityEnabled: false,
       toolVerbosity: "errors-only",
-      onSend: async (text, messageId) => {
+      onEdit: async (text, messageId) => {
         if (messageId === 1 && text.includes("❌")) {
           toolErrorStarted.resolve();
           await toolErrorRelease.promise;
@@ -1416,18 +1643,18 @@ describe("prompt handler", () => {
     toolErrorRelease.resolve();
     await expect(result).resolves.toBe(true);
 
+    const workingAbort = harness.operations.findIndex(
+      (operation) => operation.kind === "send" && operation.messageId === 1 && operation.hasAbort,
+    );
     const toolError = harness.operations.findIndex(
-      (operation) => operation.kind === "send" && operation.messageId === 1 && operation.text.includes("❌"),
+      (operation) => operation.kind === "edit" && operation.messageId === 1 && operation.text.includes("❌"),
     );
-    const attachToolAbort = harness.operations.findIndex(
-      (operation) => operation.kind === "markup" && operation.messageId === 1 && operation.hasAbort,
-    );
-    const clearToolAbort = harness.operations.findIndex(
+    const clearWorkingAbort = harness.operations.findIndex(
       (operation) => operation.kind === "markup" && operation.messageId === 1 && !operation.hasAbort,
     );
-    expect(toolError).toBeGreaterThanOrEqual(0);
-    expect(attachToolAbort).toBeGreaterThanOrEqual(0);
-    expect(clearToolAbort).toBeGreaterThan(toolError);
+    expect(workingAbort).toBeGreaterThanOrEqual(0);
+    expect(toolError).toBeGreaterThan(workingAbort);
+    expect(clearWorkingAbort).toBeGreaterThan(toolError);
 
     const callbacks = harness.callbacks();
     callbacks?.onToolStart("bash", "late-tool", {});

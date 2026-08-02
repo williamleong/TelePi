@@ -135,6 +135,9 @@ async function runPromptFlow(
   const dialogBackedToolCallIds = new Set<string>();
   let abortOwnerMessageId: number | undefined;
   const abortOwnerMessageIds = new Set<number>();
+  let workingMessageId: number | undefined;
+  let workingMessagePromise: Promise<void> | undefined;
+  let workingMessageAdopted = false;
   let deliveryTimer: NodeJS.Timeout | undefined;
   let deliveryWorkerPromise: Promise<void> | undefined;
   const deliveryQueue: DeliveryOperation[] = [];
@@ -208,6 +211,74 @@ async function runPromptFlow(
     }
   };
 
+  const ensureWorkingMessage = async (): Promise<void> => {
+    if (workingMessageId !== undefined) {
+      return;
+    }
+    if (workingMessagePromise) {
+      return workingMessagePromise;
+    }
+
+    workingMessagePromise = (async () => {
+      const message = await sendTextMessage(bot.api, target, "<i>⏳ Working…</i>", {
+        fallbackText: "⏳ Working…",
+        replyMarkup: abortKeyboard,
+      });
+      workingMessageId = message.message_id;
+      abortOwnerMessageId = message.message_id;
+      abortOwnerMessageIds.add(message.message_id);
+      trackCallbackMessage?.(target, message.message_id);
+      sendTyping();
+    })();
+
+    try {
+      await workingMessagePromise;
+    } catch (error) {
+      console.error("Failed to send Telegram working message", error);
+    } finally {
+      workingMessagePromise = undefined;
+    }
+  };
+
+  const adoptWorkingMessage = async (rendered: RenderedText): Promise<number | undefined> => {
+    if (workingMessageId === undefined || workingMessageAdopted) {
+      return undefined;
+    }
+
+    await safeEditMessage(bot, target, workingMessageId, rendered.text, {
+      parseMode: rendered.parseMode,
+      fallbackText: rendered.fallbackText,
+      delivery: rendered.delivery,
+      replyMarkup: abortKeyboard,
+    });
+    workingMessageAdopted = true;
+    sendTyping();
+    return workingMessageId;
+  };
+
+  const sendLegacyOutput = async (rendered: RenderedText): Promise<number> => {
+    const hasAbortOwner = abortOwnerMessageId !== undefined;
+    const message = await sendTextMessage(bot.api, target, rendered.text, {
+      parseMode: rendered.parseMode,
+      fallbackText: rendered.fallbackText,
+      replyMarkup: hasAbortOwner ? undefined : abortKeyboard,
+    });
+
+    if (!hasAbortOwner) {
+      abortOwnerMessageId = message.message_id;
+      abortOwnerMessageIds.add(message.message_id);
+      trackCallbackMessage?.(target, message.message_id);
+    } else {
+      try {
+        await migrateAbortOwner(message.message_id);
+      } catch (error) {
+        console.error("Failed to migrate Telegram Abort button", error);
+      }
+    }
+
+    return message.message_id;
+  };
+
   const latestOutputMessageId = (): number | undefined => {
     for (const segment of [...streamSegments.getSegments()].reverse()) {
       for (const chunk of [...segment.chunks].reverse()) {
@@ -248,6 +319,15 @@ async function runPromptFlow(
       const current = streamSegments.getSegments().find((candidate) => candidate.id === segment.id)?.chunks[index];
       if (!current) {
         continue;
+      }
+
+      if (current.messageId === undefined) {
+        const adoptedMessageId = await adoptWorkingMessage(rendered);
+        if (adoptedMessageId !== undefined) {
+          streamSegments.setChunkMessageId(segment.id, index, adoptedMessageId);
+          changed = true;
+          continue;
+        }
       }
 
       if (current.messageId === undefined) {
@@ -466,6 +546,22 @@ async function runPromptFlow(
     lastAssistant.revision += 1;
   };
 
+  const deleteUnusedWorkingMessage = async (): Promise<void> => {
+    if (workingMessageId === undefined || workingMessageAdopted) {
+      return;
+    }
+
+    try {
+      await bot.api.deleteMessage(target.chatId, workingMessageId);
+      abortOwnerMessageIds.delete(workingMessageId);
+      if (abortOwnerMessageId === workingMessageId) {
+        abortOwnerMessageId = undefined;
+      }
+    } catch (error) {
+      console.error("Failed to delete Telegram working message", error);
+    }
+  };
+
   const finalizeSuccess = async (): Promise<void> => {
     if (finalizationPromise) {
       return finalizationPromise;
@@ -475,6 +571,7 @@ async function runPromptFlow(
       deliveryFinalizing = true;
       appendToolSummary();
       await drainDelivery();
+      await deleteUnusedWorkingMessage();
       await cleanupAbortOwners();
       deliveryFinalized = true;
       stopTyping();
@@ -492,7 +589,14 @@ async function runPromptFlow(
       await drainDeliveryAfterFailure();
       const status = renderPromptFailure("", error);
       try {
-        await safeReply(ctx, status, { fallbackText: status }, target);
+        if (workingMessageId !== undefined && !workingMessageAdopted) {
+          await safeEditMessage(bot, target, workingMessageId, status, {
+            fallbackText: status,
+            replyMarkup: abortKeyboard,
+          });
+        } else {
+          await safeReply(ctx, status, { fallbackText: status }, target);
+        }
       } catch (telegramError) {
         console.error("Failed to send Telegram prompt failure status", telegramError);
       }
@@ -609,20 +713,17 @@ async function runPromptFlow(
       }
       const messageText = renderToolStartMessage(toolName);
       enqueueLegacyDelivery(async () => {
-        const message = await sendTextMessage(bot.api, target, messageText.text, {
-          parseMode: messageText.parseMode,
-          fallbackText: messageText.fallbackText,
-        });
         const state = toolStates.get(toolCallId);
         if (!state) {
           return;
         }
-        state.messageId = message.message_id;
-        try {
-          await migrateAbortOwner(message.message_id);
-        } catch (error) {
-          console.error("Failed to migrate Telegram Abort button", error);
+        const adoptedMessageId = await adoptWorkingMessage(messageText);
+        if (adoptedMessageId !== undefined) {
+          state.messageId = adoptedMessageId;
+          return;
         }
+
+        state.messageId = await sendLegacyOutput(messageText);
       }, `Failed to send tool start message for ${toolName}`);
     },
     onToolUpdate: (toolCallId, partialResult) => {
@@ -672,15 +773,12 @@ async function runPromptFlow(
           return;
         }
         enqueueLegacyDelivery(async () => {
-          const message = await sendTextMessage(bot.api, target, state.finalStatus!.text, {
-            parseMode: state.finalStatus!.parseMode,
-            fallbackText: state.finalStatus!.fallbackText,
-          });
-          try {
-            await migrateAbortOwner(message.message_id);
-          } catch (error) {
-            console.error("Failed to migrate Telegram Abort button", error);
+          const adoptedMessageId = await adoptWorkingMessage(state.finalStatus!);
+          if (adoptedMessageId !== undefined) {
+            return;
           }
+
+          await sendLegacyOutput(state.finalStatus!);
         }, `Failed to send tool error message for ${state.toolName}`);
         return;
       }
@@ -706,6 +804,8 @@ async function runPromptFlow(
       });
     },
   });
+
+    await ensureWorkingMessage();
 
     if (images && images.length > 0) {
       await piSession.prompt(userText, images);
