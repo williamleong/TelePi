@@ -82,7 +82,7 @@ Telegram-backed extension UI dialog lifecycle for:
 - timeout/cancel/finalization behavior
 
 ### `src/bot/stream-segments.ts`
-Telegram-free state for the chronological prompt transcript. It groups adjacent thinking/tool events into activity segments and adjacent assistant deltas into assistant segments, seals segments when the output kind changes, tracks tool ownership and Telegram chunk metadata, and exposes dirty revisions for delivery.
+Telegram-free state for the chronological prompt transcript. It groups adjacent thinking/tool events into activity segments and adjacent assistant deltas into assistant segments, seals segments when the output kind changes, tracks tool ownership and Telegram chunk metadata, and exposes dirty revisions for delivery. Structured Agent partial results update their owning tool entry and increment its segment revision only when the visible activity changes.
 
 ### `src/bot/prompt-handler.ts`
 Owns the prompt execution lifecycle and one serialized chronological delivery pipeline:

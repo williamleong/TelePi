@@ -31,7 +31,7 @@
 - Produces: Agent tool entries with optional `detail?: string`
 - Consumes: Agent partial results shaped as `{ details: { activity: string } }`
 
-- [ ] **Step 1: Write failing session-bridge and activity tests**
+- [x] **Step 1: Write failing session-bridge and activity tests**
 
 Change the session assertion to require the original object:
 
@@ -88,7 +88,7 @@ it("ignores structured updates for other tools", () => {
 
 Add a matching error assertion for `✗ Agent — Find relevant code\nError`.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run:
 
@@ -98,7 +98,7 @@ npm test -- test/pi-session.test.ts test/bot/activity-rendering.test.ts
 
 Expected: FAIL because the session bridge stringifies the partial result and `updateTool()` does not exist.
 
-- [ ] **Step 3: Forward structured partial results**
+- [x] **Step 3: Forward structured partial results**
 
 Change the callback type and subscription:
 
@@ -114,7 +114,7 @@ case "tool_execution_update":
 
 Remove `stringifyToolData()` if no references remain.
 
-- [ ] **Step 4: Add Agent-specific transcript state**
+- [x] **Step 4: Add Agent-specific transcript state**
 
 Extend the tool entry and interface:
 
@@ -164,7 +164,7 @@ if (entry.toolName === "Agent") {
 
 Keep existing `summarizeTool(toolName, args)` behavior for every other tool.
 
-- [ ] **Step 5: Run focused tests and verify GREEN**
+- [x] **Step 5: Run focused tests and verify GREEN**
 
 Run:
 
@@ -174,7 +174,7 @@ npm test -- test/pi-session.test.ts test/bot/activity-rendering.test.ts
 
 Expected: both suites PASS.
 
-- [ ] **Step 6: Commit the structured update model**
+- [x] **Step 6: Commit the structured update model**
 
 ```bash
 git add src/pi-session.ts src/bot/activity-rendering.ts test/pi-session.test.ts test/bot/activity-rendering.test.ts
@@ -196,7 +196,7 @@ git commit -m "feat: model Agent live activity"
 - Produces: `StreamSegments.updateTool(toolCallId: string, partialResult: unknown): StreamSegment | undefined`
 - Consumes: structured `PiSessionCallbacks.onToolUpdate` values
 
-- [ ] **Step 1: Write failing stream-segment tests**
+- [x] **Step 1: Write failing stream-segment tests**
 
 Add tests proving the owning segment changes in place and invalid updates do not change its revision:
 
@@ -230,7 +230,7 @@ it("does not dirty a segment for unusable Agent updates", () => {
 });
 ```
 
-- [ ] **Step 2: Write a failing prompt-delivery test**
+- [x] **Step 2: Write a failing prompt-delivery test**
 
 Use `createPromptHarness()` with activity enabled. Start Agent, wait for message 2, emit one structured update, wait for the edit, then finish:
 
@@ -269,7 +269,7 @@ it("edits the Agent activity message with live progress", async () => {
 
 Update the harness callback type, if locally declared, so `onToolUpdate` accepts `unknown`.
 
-- [ ] **Step 3: Run focused tests and verify RED**
+- [x] **Step 3: Run focused tests and verify RED**
 
 Run:
 
@@ -279,7 +279,7 @@ npm test -- test/bot/stream-segments.test.ts test/bot/prompt-handler.test.ts
 
 Expected: FAIL because `StreamSegments.updateTool()` does not exist and activity mode discards tool updates.
 
-- [ ] **Step 4: Implement segment update ownership**
+- [x] **Step 4: Implement segment update ownership**
 
 Add the interface method and implementation:
 
@@ -296,7 +296,7 @@ updateTool(toolCallId, partialResult) {
 
 Do not create a new segment and do not alter `toolSegmentIds`; completion still owns cleanup.
 
-- [ ] **Step 5: Route updates through chronological delivery**
+- [x] **Step 5: Route updates through chronological delivery**
 
 Change activity-mode handling in `prompt-handler.ts`:
 
@@ -327,7 +327,7 @@ function stringifyToolUpdate(value: unknown): string {
 
 Call `stringifyToolUpdate(partialResult)` before the existing `appendWithCap()` call. Preserve current summary/none/all/errors-only behavior.
 
-- [ ] **Step 6: Run focused tests and verify GREEN**
+- [x] **Step 6: Run focused tests and verify GREEN**
 
 Run:
 
@@ -337,7 +337,7 @@ npm test -- test/bot/stream-segments.test.ts test/bot/prompt-handler.test.ts tes
 
 Expected: all focused suites PASS.
 
-- [ ] **Step 7: Commit Telegram delivery integration**
+- [x] **Step 7: Commit Telegram delivery integration**
 
 ```bash
 git add src/bot/stream-segments.ts src/bot/prompt-handler.ts test/bot/stream-segments.test.ts test/bot/prompt-handler.test.ts
@@ -356,7 +356,7 @@ git commit -m "feat: stream Agent progress to Telegram"
 - Consumes: completed Agent live-progress behavior from Tasks 1 and 2
 - Produces: user and maintainer documentation for the Agent-specific update path
 
-- [ ] **Step 1: Update user documentation**
+- [x] **Step 1: Update user documentation**
 
 Add one sentence to the activity section:
 
@@ -364,11 +364,11 @@ Add one sentence to the activity section:
 Foreground Agent rows also edit in place with the subagent's compact current activity, such as `reading…` or `running command…`, and settle to `Done` or `Error`.
 ```
 
-- [ ] **Step 2: Update architecture documentation**
+- [x] **Step 2: Update architecture documentation**
 
 Document that activity segments route structured Agent partial results back to the owning tool entry and increment its revision only when the visible activity changes.
 
-- [ ] **Step 3: Run formatting and type checks**
+- [x] **Step 3: Run formatting and type checks**
 
 Run:
 
@@ -379,7 +379,7 @@ npm run build
 
 Expected: no whitespace errors and TypeScript compilation succeeds.
 
-- [ ] **Step 4: Run the complete test suite**
+- [x] **Step 4: Run the complete test suite**
 
 Run:
 
@@ -389,14 +389,14 @@ npm test
 
 Expected: all test files and tests PASS.
 
-- [ ] **Step 5: Commit documentation**
+- [x] **Step 5: Commit documentation**
 
 ```bash
 git add README.md docs/architecture.md
 git commit -m "docs: explain Agent live progress"
 ```
 
-- [ ] **Step 6: Inspect final branch state**
+- [x] **Step 6: Inspect final branch state**
 
 Run:
 
