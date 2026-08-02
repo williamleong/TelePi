@@ -251,18 +251,20 @@ function createPromptHarness(options: {
       preloadedSlashCommands,
       images,
       waitForCompletion = true,
+      allowSteering,
     }: {
       text?: string;
       preloadedSlashCommands?: any[];
       images?: any[];
       waitForCompletion?: boolean;
+      allowSteering?: boolean;
     }) => handler(
       { api: botApi } as any,
       { chatId: 123 },
       text,
       preloadedSlashCommands,
       images,
-      { waitForCompletion },
+      { waitForCompletion, allowSteering },
     ),
   };
 }
@@ -336,6 +338,22 @@ describe("prompt handler", () => {
     expect(harness.trySteer).toHaveBeenCalledWith({ chatId: 123 }, "check the logs");
     expect(harness.sendBusyReply).toHaveBeenCalledTimes(1);
     expect(harness.taskRunner.tryStartPrompt).not.toHaveBeenCalled();
+  });
+
+  it("keeps the busy reply when explicitly non-steerable input discovers a busy task reservation", async () => {
+    const harness = createPromptHarness({
+      taskRunnerResult: "busy",
+      trySteer: vi.fn().mockResolvedValue(true),
+    });
+
+    await expect(harness.runInput({
+      text: "transcribed prompt",
+      allowSteering: false,
+    })).resolves.toBe(false);
+
+    expect(harness.trySteer).not.toHaveBeenCalled();
+    expect(harness.sendBusyReply).toHaveBeenCalledTimes(1);
+    expect(harness.taskRunner.tryStartPrompt).toHaveBeenCalledTimes(1);
   });
 
   it("reports steering failures without starting a second prompt flow", async () => {

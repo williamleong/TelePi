@@ -54,7 +54,7 @@ import type {
   PiSessionService,
 } from "../src/pi-session.js";
 import { createBot, registerCommands } from "../src/bot.js";
-import { startPromptInboxPolling } from "../src/bot/prompt-inbox.js";
+import { pollPromptInboxOnce, startPromptInboxPolling } from "../src/bot/prompt-inbox.js";
 import { getAvailableBackends, transcribeAudio } from "../src/voice.js";
 
 type SwitchResult = Awaited<ReturnType<PiSessionService["switchSession"]>>;
@@ -1865,6 +1865,92 @@ describe("createBot", () => {
     expect(inboxOptions?.isBusy(inboxOptions.target)).toBe(true);
     expect(pi.service.steer).not.toHaveBeenCalled();
     expect(api.getFile).not.toHaveBeenCalled();
+  });
+
+  it("moves an inbox file to failed when a stream starts after its idle poll check", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "telepi-inbox-race-"));
+    const promptPath = path.join(tempDir, "race.txt");
+    const isStreaming = vi.fn().mockReturnValueOnce(false).mockReturnValue(true);
+    vi.mocked(startPromptInboxPolling).mockClear();
+    const { registry } = setupBot({
+      configOverrides: { promptInboxDir: tempDir },
+      perContextSessionOverrides: {
+        [makeContextKey(ALLOWED_USER_ID)]: { isStreaming },
+      },
+    });
+    await registry.registry.getOrCreate({ chatId: ALLOWED_USER_ID });
+    const inboxSession = registry.getSession(ALLOWED_USER_ID)!.service;
+    const inboxOptions = vi.mocked(startPromptInboxPolling).mock.calls[0]?.[0];
+    writeFileSync(promptPath, "do not steer this inbox prompt");
+    vi.mocked(readFile).mockResolvedValueOnce("do not steer this inbox prompt" as never);
+
+    try {
+      await expect(pollPromptInboxOnce({
+        ...inboxOptions!,
+        inboxDir: tempDir,
+      })).resolves.toBe("failed");
+
+      expect(inboxSession.steer).not.toHaveBeenCalled();
+      expect(inboxSession.prompt).not.toHaveBeenCalled();
+      expect(existsSync(promptPath)).toBe(false);
+      expect(existsSync(`${promptPath}.failed`)).toBe(true);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an audio transcript busy when streaming starts after its media precheck", async () => {
+    let streamStarted = false;
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        isStreaming: vi.fn(() => streamStarted),
+      },
+    });
+    vi.mocked(transcribeAudio).mockImplementationOnce(async () => {
+      streamStarted = true;
+      return {
+        text: "transcribed text",
+        backend: "openai",
+        durationMs: 500,
+      };
+    });
+
+    await bot.handleUpdate(createVoiceUpdate());
+
+    expect(pi.service.steer).not.toHaveBeenCalled();
+    expect(pi.service.prompt).not.toHaveBeenCalled();
+    expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Still working on previous message...");
+  });
+
+  it("keeps a native-menu command busy when streaming starts after its callback precheck", async () => {
+    let streamStarted = false;
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        isStreaming: vi.fn(() => streamStarted),
+        listSlashCommands: vi.fn().mockResolvedValue([
+          makeTelepiBareNativeMenuSlashCommand("deploy", [
+            { id: "status", label: "Status", commandText: "/deploy status" },
+          ]),
+        ]),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/deploy" } }));
+    const callbackData = getReplyMarkupData(api)[0]!;
+    let acknowledge!: () => void;
+    api.answerCallbackQuery.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    }));
+
+    const pendingCallback = bot.handleUpdate(createCallbackUpdate(callbackData));
+    await nextTick();
+    streamStarted = true;
+    acknowledge();
+    await pendingCallback;
+
+    expect(pi.service.steer).not.toHaveBeenCalled();
+    expect(pi.service.prompt).not.toHaveBeenCalled();
+    expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Still working on previous message...");
   });
 
   it("reports steering rejection once without disturbing the active Pi stream", async () => {

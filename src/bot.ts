@@ -692,6 +692,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
       handlePrompt: async (promptTarget, prompt) =>
         await handleUserPrompt({ api: bot.api } as Context, promptTarget, prompt, undefined, undefined, {
           waitForCompletion: true,
+          allowSteering: false,
         }),
       onError: (error) => {
         console.error("Prompt inbox polling failed", error);
@@ -1096,7 +1097,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     }
 
     await answerCallbackQuerySafely(ctx, { text: `Running ${action.commandText}` }, logOptions);
-    await handleUserPrompt(ctx, target, action.commandText);
+    await handleUserPrompt(ctx, target, action.commandText, undefined, undefined, { allowSteering: false });
   });
 
   handlePageCallback(/^switch_page_(\d+)$/, "switch", pendingSessionButtons, "Expired, run /sessions again");
@@ -1425,7 +1426,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
       }
 
       const commandText = rewriteSlashCommandForTelegram(normalizedSlashCommand, slashCommands);
-      await handleUserPrompt(ctx, target, commandText, slashCommands);
+      await handleUserPrompt(ctx, target, commandText, slashCommands, undefined, { allowSteering: false });
       return;
     }
 
@@ -1498,7 +1499,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
       return;
     }
 
-    await handleUserPrompt(ctx, target, promptText, undefined, images);
+    await handleUserPrompt(ctx, target, promptText, undefined, images, { allowSteering: false });
   });
 
   bot.on(["message:voice", "message:audio"], async (ctx) => {
@@ -1560,7 +1561,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
       return;
     }
 
-    await handleUserPrompt(ctx, target, transcript);
+    await handleUserPrompt(ctx, target, transcript, undefined, undefined, { allowSteering: false });
   });
 
   bot.catch((error) => {

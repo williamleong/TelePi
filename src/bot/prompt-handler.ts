@@ -35,6 +35,7 @@ import type { PiSessionContext, PiSessionInfo, PiSessionService } from "../pi-se
 
 export interface HandleUserPromptOptions {
   waitForCompletion?: boolean;
+  allowSteering?: boolean;
 }
 
 export type HandleUserPrompt = (
@@ -719,7 +720,9 @@ export function createPromptHandler(options: CreatePromptHandlerOptions): Handle
     images?: ImageContent[],
     options?: HandleUserPromptOptions,
   ): Promise<boolean> => {
-    const steerableInput = preloadedSlashCommands === undefined && (!images || images.length === 0);
+    const steerableInput = options?.allowSteering !== false
+      && preloadedSlashCommands === undefined
+      && (!images || images.length === 0);
     if (isBusy(target)) {
       if (steerableInput && await acceptSteering(ctx, target, userText)) {
         return true;
