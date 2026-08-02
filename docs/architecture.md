@@ -73,6 +73,7 @@ Pure keyboard helpers for:
 Per-chat/topic transient state for:
 - processing/switching/transcribing busy flags
 - retry memory (`/retry`)
+- per-chat/topic activity detail settings (`/activity on|off`), defaulting to on and resetting on restart
 
 ### `src/bot/extension-dialogs.ts`
 Telegram-backed extension UI dialog lifecycle for:
@@ -82,19 +83,24 @@ Telegram-backed extension UI dialog lifecycle for:
 - timeout/cancel/finalization behavior
 
 ### `src/bot/stream-segments.ts`
-Telegram-free state for the chronological prompt transcript. It groups adjacent thinking/tool events into activity segments and adjacent assistant deltas into assistant segments, seals segments when the output kind changes, tracks tool ownership and Telegram chunk metadata, and exposes dirty revisions for delivery.
+Telegram-free state for the chronological prompt transcript. It groups adjacent thinking/tool events into activity segments and adjacent assistant deltas into assistant segments, seals segments when the output kind changes, tracks tool ownership and Telegram chunk metadata, and exposes dirty revisions for the segment worker's delivery.
 
 ### `src/bot/prompt-handler.ts`
-Owns the prompt execution lifecycle and one serialized chronological delivery pipeline:
+Owns the prompt execution lifecycle and one serialized chronological segment worker:
 - busy checks, session bootstrap, and extension binding
-- status-only `Working…` message creation
 - Pi callback routing into activity and assistant segments
 - debounced, ordered Telegram sends/edits for dirty segment revisions
-- attach-before-detach migration of the single Abort keyboard to the newest output message
+- all output delivery and attach-before-detach migration of the single Abort keyboard to the newest output message
 - native `typing` refreshes throughout the prompt, stopping only when the run settles
-- final delivery drain, status update, Abort cleanup, and response/error finalization
+- final delivery drain, Abort cleanup, and response/error finalization
 
-The status message never receives assistant output. Activity and assistant segments are appended in event order; adjacent events of one kind continue the open segment, while a kind switch starts a new message. Finalization waits for the authoritative delivery worker to drain all pending revisions before changing status or clearing controls.
+There is no success-path Working/Done status message: typing is the pre-output progress signal, and `/abort` is handled before output or from the Abort button after the first output. The segment worker owns every activity/assistant send and edit plus Abort migration, so activity and assistant segments remain chronological; adjacent events of one kind continue the open message, while a kind switch starts a new message. Success finalization is keyboard and typing cleanup only, while failure finalization emits the user-facing error. The worker drains all pending revisions before controls are cleared.
+
+### `src/pi-session.ts`
+`PiSessionService.steer()` forwards ordinary follow-on text to the active SDK `AgentSession.steer()` queue. Steering uses the active queue and does not create a second prompt handler or prompt flow.
+
+### `src/bot.ts`
+The bot decides whether a message can steer before handing it to the prompt handler: ordinary text is eligible only when local chat/topic busy state is clear and the mapped Pi session reports streaming; media and slash commands are excluded. Topic/session-name synchronization remains bidirectional and scoped to the active chat/topic mapping.
 
 ### `src/bot/commands/*`
 Grouped command handlers split by concern:
