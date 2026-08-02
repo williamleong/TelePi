@@ -1,7 +1,7 @@
 import { InlineKeyboard } from "grammy";
 
 import type { PiSessionContext } from "../pi-session.js";
-import { renderDialogPanel, trimLine } from "./message-rendering.js";
+import { renderDialogPanel, TELEGRAM_MESSAGE_LIMIT, trimLine } from "./message-rendering.js";
 import type { TextOptions } from "./telegram-transport.js";
 
 export type PendingExtensionDialog =
@@ -231,6 +231,9 @@ export function createExtensionDialogManager(deps: {
 
       const optionLines = options.map((option, index) => `${index + 1}. ${option}`);
       const rendered = renderDialogPanel(title, [...optionLines, "Use the buttons below."], "🧭");
+      if (rendered.text.length > TELEGRAM_MESSAGE_LIMIT || rendered.fallbackText.length > TELEGRAM_MESSAGE_LIMIT) {
+        throw new Error(`Telegram select dialog exceeds the ${TELEGRAM_MESSAGE_LIMIT}-character message limit.`);
+      }
       const message = await deps.sendTextMessage(target, rendered.text, {
         parseMode: rendered.parseMode,
         fallbackText: rendered.fallbackText,

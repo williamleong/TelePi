@@ -51,6 +51,42 @@ describe("extension dialog manager", () => {
     await expect(pendingChoice).resolves.toBe("Beta — Continue deployment");
   });
 
+  it("rejects select dialogs whose rendered Telegram text exceeds the safe limit", async () => {
+    const sendTextMessage = vi.fn().mockRejectedValue(new Error("direct transport must not send oversized dialogs"));
+    const manager = createExtensionDialogManager({
+      getContextKey: (ctx) => `${String(ctx.chatId)}::${ctx.messageThreadId ?? "root"}`,
+      sendTextMessage,
+      editMessage: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await expect(manager.openSelect(target, "Pick one", ["x".repeat(4_000)])).rejects.toThrow(
+      "Telegram select dialog exceeds the 4000-character message limit.",
+    );
+    expect(sendTextMessage).not.toHaveBeenCalled();
+    expect(manager.hasPending(target)).toBe(false);
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    "keeps dialogs pending for invalid timeout %s",
+    async (timeout) => {
+      const { manager, editMessage } = createManager();
+
+      vi.useFakeTimers();
+      try {
+        const pending = manager.openSelect(target, "Pick one", ["Alpha", "Beta"], { timeout });
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        expect(manager.hasPending(target)).toBe(true);
+        expect(editMessage).not.toHaveBeenCalled();
+        await manager.cancelPending(target);
+        await expect(pending).resolves.toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("keeps dialogs without an explicit timeout pending", async () => {
     const { manager, editMessage } = createManager();
 
