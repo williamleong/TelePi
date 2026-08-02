@@ -12,12 +12,14 @@ export type ActivityEntry =
       toolName: string;
       args: unknown;
       status: ActivityToolStatus;
+      detail?: string;
     };
 
 export interface ActivityTranscript {
   readonly entries: ActivityEntry[];
   appendThinking(event: PiThinkingDelta): void;
   startTool(toolCallId: string, toolName: string, args: unknown): void;
+  updateTool(toolCallId: string, partialResult: unknown): boolean;
   finishTool(toolCallId: string, isError: boolean): void;
 }
 
@@ -46,6 +48,23 @@ export function createActivityTranscript(): ActivityTranscript {
         status: "running",
       });
     },
+    updateTool(toolCallId, partialResult) {
+      const entry = entries.find(
+        (candidate): candidate is Extract<ActivityEntry, { kind: "tool" }> =>
+          candidate.kind === "tool" && candidate.toolCallId === toolCallId,
+      );
+      if (!entry || entry.toolName !== "Agent") {
+        return false;
+      }
+
+      const activity = readNestedActivity(partialResult);
+      if (!activity || activity === entry.detail) {
+        return false;
+      }
+
+      entry.detail = activity;
+      return true;
+    },
     finishTool(toolCallId, isError) {
       const entry = entries.find(
         (candidate): candidate is Extract<ActivityEntry, { kind: "tool" }> =>
@@ -53,6 +72,9 @@ export function createActivityTranscript(): ActivityTranscript {
       );
       if (entry) {
         entry.status = isError ? "error" : "success";
+        if (entry.toolName === "Agent") {
+          entry.detail = isError ? "Error" : "Done";
+        }
       }
     },
   };
@@ -174,7 +196,7 @@ function renderThinkingBlock(text: string, continued: boolean): ActivityBlock {
 }
 
 function fitToolBlock(entry: Extract<ActivityEntry, { kind: "tool" }>): ActivityBlock {
-  const summary = summarizeTool(entry.toolName, entry.args);
+  const summary = summarizeActivityTool(entry);
   const status = statusSymbol(entry.status);
   const header = `${status} ${summary.label}`;
   const render = (detail: string | undefined): ActivityBlock => ({
@@ -208,6 +230,20 @@ function fitToolBlock(entry: Extract<ActivityEntry, { kind: "tool" }>): Activity
   return render(low > 0 ? `${characters.slice(0, low).join("")}…` : undefined);
 }
 
+function summarizeActivityTool(
+  entry: Extract<ActivityEntry, { kind: "tool" }>,
+): { label: string; detail?: string } {
+  if (entry.toolName === "Agent") {
+    const description = readString(entry.args, "description")?.trim();
+    return {
+      label: description ? `Agent — ${description}` : "Agent",
+      detail: entry.detail,
+    };
+  }
+
+  return summarizeTool(entry.toolName, entry.args);
+}
+
 function summarizeTool(toolName: string, args: unknown): { label: string; detail?: string } {
   switch (toolName) {
     case "read":
@@ -236,12 +272,25 @@ function summarizeTool(toolName: string, args: unknown): { label: string; detail
 }
 
 function readString(value: unknown, key: string): string | undefined {
-  if (!value || typeof value !== "object") {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
 
   const field = (value as Record<string, unknown>)[key];
   return typeof field === "string" ? field : undefined;
+}
+
+function readNestedActivity(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const details = (value as Record<string, unknown>).details;
+  if (!details || typeof details !== "object" || Array.isArray(details)) {
+    return undefined;
+  }
+
+  return readString(details, "activity")?.trim() || undefined;
 }
 
 function formatPatternAndPath(pattern: string | undefined, path: string | undefined): string | undefined {
