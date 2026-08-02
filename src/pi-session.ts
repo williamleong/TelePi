@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -1545,10 +1545,22 @@ function isInvalidSavedSessionError(error: unknown, runtimeSessionPath: string):
     return false;
   }
   const filesystemError = error as NodeJS.ErrnoException;
-  return (
+  if (
     (filesystemError.code === "EISDIR" || filesystemError.code === "ENOTDIR" || filesystemError.code === "EACCES")
     && filesystemError.path === runtimeSessionPath
-  );
+  ) {
+    return true;
+  }
+
+  if (filesystemError.code !== "EISDIR" || filesystemError.syscall !== "read" || filesystemError.path !== undefined) {
+    return false;
+  }
+
+  try {
+    return statSync(runtimeSessionPath).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function normalizeNewSessionOptions(
