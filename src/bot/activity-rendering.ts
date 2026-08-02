@@ -105,7 +105,7 @@ export function renderActivityTranscript(transcript: ActivityTranscript): Render
   };
 
   const appendBlock = (block: ActivityBlock): boolean => {
-    const separator = current ? "\n" : "";
+    const separator = current ? "\n\n" : "";
     const next = {
       html: `${current?.html ?? ""}${separator}${block.html}`,
       fallback: `${current?.fallback ?? ""}${separator}${block.fallback}`,
