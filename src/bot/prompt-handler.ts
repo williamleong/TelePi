@@ -138,8 +138,14 @@ async function runPromptFlow(
   let workingMessageId: number | undefined;
   let workingMessagePromise: Promise<void> | undefined;
   let workingMessageRemovalPromise: Promise<void> | undefined;
+  let workingMessageRemovalClaimed = false;
+  let workingMessageRemovalFailed = false;
   let workingMessageRemoved = false;
   let workingMessageAdopted = false;
+  let dialogControlCallId: string | undefined;
+  let dialogControlHandoffPromise: Promise<void> | undefined;
+  let dialogControlHandoffCompleted = false;
+  let dialogControlEndingCallId: string | undefined;
   let deliveryTimer: NodeJS.Timeout | undefined;
   let deliveryWorkerPromise: Promise<void> | undefined;
   const deliveryQueue: DeliveryOperation[] = [];
@@ -196,7 +202,7 @@ async function runPromptFlow(
   };
 
   const migrateAbortOwner = async (messageId: number): Promise<void> => {
-    if (abortOwnerMessageId === messageId) {
+    if (dialogControlCallId !== undefined || abortOwnerMessageId === messageId) {
       return;
     }
 
@@ -243,27 +249,32 @@ async function runPromptFlow(
   };
 
   const removeWorkingMessage = async (): Promise<void> => {
-    if (workingMessageRemoved || workingMessageAdopted) {
-      return;
-    }
     if (workingMessageRemovalPromise) {
       return workingMessageRemovalPromise;
     }
-    if (workingMessageId === undefined) {
+    if (workingMessageRemoved || workingMessageAdopted || workingMessageId === undefined) {
       return;
     }
 
     const messageId = workingMessageId;
-    workingMessageRemoved = true;
-    abortOwnerMessageIds.delete(messageId);
-    if (abortOwnerMessageId === messageId) {
-      abortOwnerMessageId = undefined;
-    }
+    workingMessageRemovalClaimed = true;
     workingMessageRemovalPromise = (async () => {
       try {
         await bot.api.deleteMessage(target.chatId, messageId);
+        workingMessageRemoved = true;
+        abortOwnerMessageIds.delete(messageId);
+        if (abortOwnerMessageId === messageId) {
+          abortOwnerMessageId = undefined;
+        }
       } catch (error) {
+        workingMessageRemovalFailed = true;
         console.error("Failed to delete Telegram working message", error);
+        await clearAbortKeyboard(messageId);
+        if (abortOwnerMessageId === messageId) {
+          abortOwnerMessageId = undefined;
+        }
+      } finally {
+        workingMessageRemovalClaimed = false;
       }
     })();
     return workingMessageRemovalPromise;
@@ -271,7 +282,13 @@ async function runPromptFlow(
 
   const adoptWorkingMessage = async (rendered: RenderedText): Promise<number | undefined> => {
     await workingMessageRemovalPromise;
-    if (workingMessageId === undefined || workingMessageRemoved || workingMessageAdopted) {
+    if (
+      dialogControlCallId !== undefined
+      || workingMessageId === undefined
+      || workingMessageRemovalClaimed
+      || workingMessageRemoved
+      || workingMessageAdopted
+    ) {
       return undefined;
     }
 
@@ -287,12 +304,17 @@ async function runPromptFlow(
   };
 
   const sendLegacyOutput = async (rendered: RenderedText): Promise<number> => {
-    const hasAbortOwner = abortOwnerMessageId !== undefined;
+    const dialogControlActive = dialogControlCallId !== undefined;
+    const hasAbortOwner = !dialogControlActive && abortOwnerMessageId !== undefined;
     const message = await sendTextMessage(bot.api, target, rendered.text, {
       parseMode: rendered.parseMode,
       fallbackText: rendered.fallbackText,
-      replyMarkup: hasAbortOwner ? undefined : abortKeyboard,
+      replyMarkup: !dialogControlActive && !hasAbortOwner ? abortKeyboard : undefined,
     });
+
+    if (dialogControlActive) {
+      return message.message_id;
+    }
 
     if (!hasAbortOwner) {
       abortOwnerMessageId = message.message_id;
@@ -361,13 +383,14 @@ async function runPromptFlow(
       }
 
       if (current.messageId === undefined) {
+        const dialogControlActive = dialogControlCallId !== undefined;
         const message = await sendTextMessage(bot.api, target, rendered.text, {
           parseMode: rendered.parseMode,
           fallbackText: rendered.fallbackText,
           delivery: rendered.delivery,
-          replyMarkup: abortOwnerMessageId === undefined ? abortKeyboard : undefined,
+          replyMarkup: !dialogControlActive && abortOwnerMessageId === undefined ? abortKeyboard : undefined,
         });
-        if (abortOwnerMessageId === undefined) {
+        if (!dialogControlActive && abortOwnerMessageId === undefined) {
           abortOwnerMessageId = message.message_id;
           abortOwnerMessageIds.add(message.message_id);
           trackCallbackMessage?.(target, message.message_id);
@@ -390,7 +413,7 @@ async function runPromptFlow(
       changed = true;
     }
 
-    if (changed) {
+    if (changed && dialogControlCallId === undefined) {
       const newestMessageId = latestOutputMessageId();
       if (newestMessageId !== undefined) {
         try {
@@ -509,6 +532,57 @@ async function runPromptFlow(
     void runDeliveryWorker();
   };
 
+  const beginDialogControlHandoff = (toolCallId: string): void => {
+    if (dialogControlCallId !== undefined) {
+      return;
+    }
+
+    dialogControlCallId = toolCallId;
+    dialogControlHandoffCompleted = false;
+    dialogControlHandoffPromise = new Promise<void>((resolve) => {
+      deliveryQueue.push({
+        readyAt: Date.now(),
+        execute: async () => {
+          await removeWorkingMessage();
+          await cleanupAbortOwners();
+          abortOwnerMessageId = undefined;
+          dialogControlHandoffCompleted = true;
+          if (dialogControlEndingCallId === toolCallId) {
+            dialogControlCallId = undefined;
+            dialogControlEndingCallId = undefined;
+          }
+          resolve();
+        },
+        onError: (error) => {
+          console.error("Failed to hand off Telegram dialog controls", error);
+          dialogControlHandoffCompleted = true;
+          if (dialogControlEndingCallId === toolCallId) {
+            dialogControlCallId = undefined;
+            dialogControlEndingCallId = undefined;
+          }
+          resolve();
+        },
+      });
+    });
+    void runDeliveryWorker();
+  };
+
+  const awaitDialogControlHandoff = async (): Promise<void> => {
+    await dialogControlHandoffPromise;
+  };
+
+  const endDialogControl = (toolCallId: string): void => {
+    if (dialogControlCallId !== toolCallId) {
+      return;
+    }
+
+    dialogControlEndingCallId = toolCallId;
+    if (dialogControlHandoffCompleted) {
+      dialogControlCallId = undefined;
+      dialogControlEndingCallId = undefined;
+    }
+  };
+
   const requestDelivery = (): Promise<void> => {
     if (deliveryFinalizing || deliveryFinalized) {
       return deliveryWorkerPromise ?? Promise.resolve();
@@ -604,7 +678,11 @@ async function runPromptFlow(
       await workingMessageRemovalPromise;
       const status = renderPromptFailure("", error);
       try {
-        if (workingMessageId !== undefined && !workingMessageRemoved && !workingMessageAdopted) {
+        if (
+          workingMessageId !== undefined
+          && !workingMessageAdopted
+          && (workingMessageRemovalFailed || !workingMessageRemoved)
+        ) {
           await safeEditMessage(bot, target, workingMessageId, status, {
             fallbackText: status,
             replyMarkup: abortKeyboard,
@@ -677,21 +755,15 @@ async function runPromptFlow(
         });
       },
       select: async (title, choices, dialogOptions) => {
-        if (dialogBackedToolCallIds.size > 0) {
-          await removeWorkingMessage();
-        }
+        await awaitDialogControlHandoff();
         return extensionDialogs.openSelect(target, title, choices, dialogOptions);
       },
       confirm: async (title, message, dialogOptions) => {
-        if (dialogBackedToolCallIds.size > 0) {
-          await removeWorkingMessage();
-        }
+        await awaitDialogControlHandoff();
         return extensionDialogs.openConfirm(target, title, message, dialogOptions);
       },
       input: async (title, placeholder, dialogOptions) => {
-        if (dialogBackedToolCallIds.size > 0) {
-          await removeWorkingMessage();
-        }
+        await awaitDialogControlHandoff();
         return extensionDialogs.openInput(target, title, placeholder, dialogOptions);
       },
     }),
@@ -721,7 +793,7 @@ async function runPromptFlow(
     onToolStart: (toolName, toolCallId, args) => {
       if (isDialogBackedTool(toolName)) {
         dialogBackedToolCallIds.add(toolCallId);
-        void removeWorkingMessage();
+        beginDialogControlHandoff(toolCallId);
         return;
       }
       if (activityEnabled) {
@@ -782,6 +854,7 @@ async function runPromptFlow(
     },
     onToolEnd: (toolCallId, isError) => {
       if (dialogBackedToolCallIds.delete(toolCallId)) {
+        endDialogControl(toolCallId);
         return;
       }
       if (activityEnabled) {

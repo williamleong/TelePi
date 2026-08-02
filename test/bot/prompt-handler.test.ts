@@ -72,6 +72,7 @@ function createPromptHarness(options: {
   onSend?: (text: string, messageId: number) => Promise<void> | void;
   onEdit?: (text: string, messageId: number) => Promise<void> | void;
   onMarkup?: (messageId: number, hasAbort: boolean) => Promise<void> | void;
+  onDelete?: (messageId: number) => Promise<void> | void;
   isBusy?: (target: { chatId: number }) => boolean;
   taskRunnerResult?: "started" | "busy";
   taskRunnerResults?: Array<"started" | "busy">;
@@ -211,6 +212,7 @@ function createPromptHarness(options: {
       },
       async deleteMessage(_chatId: number, messageId: number) {
         record({ kind: "delete", messageId });
+        await options.onDelete?.(messageId);
         return true;
       },
   };
@@ -917,6 +919,173 @@ describe("prompt handler", () => {
       await expect(harness.run()).resolves.toBe(true);
     },
   );
+
+  it("waits for the in-flight Working deletion before opening ask_user", async () => {
+    const deleteRelease = deferred();
+    let deleteCompleted = false;
+    let dialogOpenedBeforeDelete = false;
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onDelete: async () => {
+        await deleteRelease.promise;
+        deleteCompleted = true;
+      },
+      onOpenDialog: () => {
+        dialogOpenedBeforeDelete = !deleteCompleted;
+      },
+      onPrompt: async (callbacks) => {
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        const select = harness.ui()!.select("Choose one", ["Yes", "No"]);
+        await harness.waitForOperation((operation) => operation.kind === "delete" && operation.messageId === 1);
+        deleteRelease.resolve();
+        await select;
+        callbacks.onToolEnd("question-1", false);
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(dialogOpenedBeforeDelete).toBe(false);
+  });
+
+  it("keeps a Working message as the failure target when dialog deletion rejects", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onDelete: () => Promise.reject(new Error("delete rejected")),
+      onPrompt: async (callbacks) => {
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        await harness.ui()!.select("Choose one", ["Yes", "No"]);
+        callbacks.onToolEnd("question-1", false);
+        throw new Error("prompt failed");
+      },
+    });
+
+    try {
+      await expect(harness.run()).resolves.toBe(false);
+      expect(harness.operations).toContainEqual(expect.objectContaining({
+        kind: "edit",
+        messageId: 1,
+        text: "⚠️ prompt failed",
+      }));
+      expect(harness.operations.filter(
+        (operation) => operation.kind === "send" && operation.text === "⚠️ prompt failed",
+      )).toEqual([]);
+      expect(harness.operations).toContainEqual({ kind: "markup", messageId: 1, hasAbort: false });
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("neutralizes Abort on adopted Working content before opening ask_user", async () => {
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onPrompt: async (callbacks) => {
+        callbacks.onThinkingDelta({ blockKey: "thinking-1", delta: "already visible" });
+        await harness.waitForOperation(
+          (operation) => operation.kind === "edit" && operation.messageId === 1 && operation.text.includes("already visible"),
+        );
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        await harness.ui()!.select("Choose one", ["Yes", "No"]);
+        callbacks.onToolEnd("question-1", false);
+        callbacks.onTextDelta("later answer");
+        await harness.waitForOperation(
+          (operation) => operation.kind === "send" && operation.messageId === 2 && operation.hasAbort,
+        );
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(harness.operations).not.toContainEqual({ kind: "delete", messageId: 1 });
+    expect(harness.operations).toContainEqual({ kind: "markup", messageId: 1, hasAbort: false });
+  });
+
+  it("queues ask_user handoff behind in-flight Working adoption", async () => {
+    const adoptionRelease = deferred();
+    const adoptionStarted = deferred();
+    let adoptionCompleted = false;
+    let dialogOpenedBeforeAdoption = false;
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onEdit: async (text, messageId) => {
+        if (messageId === 1 && text.includes("queued activity")) {
+          adoptionStarted.resolve();
+          await adoptionRelease.promise;
+          adoptionCompleted = true;
+        }
+      },
+      onOpenDialog: () => {
+        dialogOpenedBeforeAdoption = !adoptionCompleted;
+      },
+      onPrompt: async (callbacks) => {
+        callbacks.onThinkingDelta({ blockKey: "thinking-1", delta: "queued activity" });
+        await adoptionStarted.promise;
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        const select = harness.ui()!.select("Choose one", ["Yes", "No"]);
+        adoptionRelease.resolve();
+        await select;
+        callbacks.onToolEnd("question-1", false);
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(dialogOpenedBeforeAdoption).toBe(false);
+    expect(harness.operations).toContainEqual({ kind: "markup", messageId: 1, hasAbort: false });
+  });
+
+  it("keeps Abort absent while ask_user is pending and restores it for later output", async () => {
+    let abortAttachedDuringDialog = false;
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onPrompt: async (callbacks) => {
+        callbacks.onThinkingDelta({ blockKey: "thinking-1", delta: "visible activity" });
+        await harness.waitForOperation(
+          (operation) => operation.kind === "edit" && operation.messageId === 1 && operation.text.includes("visible activity"),
+        );
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        await harness.ui()!.select("Choose one", ["Yes", "No"]);
+        callbacks.onTextDelta("during dialog");
+        await harness.waitForOperation(
+          (operation) => operation.kind === "send" && operation.messageId === 2 && operation.text.includes("during dialog"),
+        );
+        abortAttachedDuringDialog = harness.markupAttempts.some(
+          (attempt) => attempt.messageId === 2 && attempt.hasAbort,
+        );
+        callbacks.onToolEnd("question-1", false);
+        callbacks.onTextDelta(" later output");
+        await harness.waitForOperation(
+          (operation) => operation.kind === "markup" && operation.messageId === 2 && operation.hasAbort,
+        );
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(harness.operations).toContainEqual({ kind: "markup", messageId: 1, hasAbort: false });
+    expect(abortAttachedDuringDialog).toBe(false);
+    expect(harness.markupAttempts).toContainEqual({ messageId: 2, hasAbort: true });
+  });
+
+  it("does not attach Abort to legacy output while ask_user is pending", async () => {
+    let legacyOutputHasAbort = true;
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      activityEnabled: false,
+      toolVerbosity: "all",
+      onPrompt: async (callbacks) => {
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        await harness.ui()!.select("Choose one", ["Yes", "No"]);
+        callbacks.onToolStart("bash", "tool-1", {});
+        const legacyOutput = await harness.waitForOperation(
+          (operation) => operation.kind === "send" && operation.text.includes("Running:"),
+        );
+        legacyOutputHasAbort = legacyOutput.hasAbort;
+        callbacks.onToolEnd("question-1", false);
+        callbacks.onToolEnd("tool-1", false);
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(legacyOutputHasAbort).toBe(false);
+  });
 
   it("sends later assistant output as a newer Abort owner after ask_user resolves", async () => {
     const harness = createPromptHarness({
