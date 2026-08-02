@@ -68,7 +68,7 @@ Changed `src/session-exchange-preview.ts` to use `currentUserText === undefined`
 
 ### Commit
 
-`804d184` (`fix: preserve empty-text session exchanges`).
+`bb5ef85` (`fix: preserve empty-text session exchanges`).
 
 ### Self-review
 
