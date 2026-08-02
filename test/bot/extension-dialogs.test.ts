@@ -1,5 +1,8 @@
 import { createExtensionDialogManager } from "../../src/bot/extension-dialogs.js";
-import { renderDialogPanel } from "../../src/bot/message-rendering.js";
+import {
+  renderDialogPanel,
+  TELEGRAM_MESSAGE_LIMIT,
+} from "../../src/bot/message-rendering.js";
 import type { PiSessionContext } from "../../src/pi-session.js";
 
 describe("extension dialog manager", () => {
@@ -51,19 +54,31 @@ describe("extension dialog manager", () => {
     await expect(pendingChoice).resolves.toBe("Beta — Continue deployment");
   });
 
-  it("rejects select dialogs whose rendered Telegram text exceeds the safe limit", async () => {
-    const sendTextMessage = vi.fn().mockRejectedValue(new Error("direct transport must not send oversized dialogs"));
-    const manager = createExtensionDialogManager({
-      getContextKey: (ctx) => `${String(ctx.chatId)}::${ctx.messageThreadId ?? "root"}`,
-      sendTextMessage,
-      editMessage: vi.fn().mockResolvedValue(undefined),
-    });
+  it.each([
+    ["select", (manager: ReturnType<typeof createExtensionDialogManager>) => manager.openSelect(target, "Pick one", ["x".repeat(4_000)])],
+    ["confirm", (manager: ReturnType<typeof createExtensionDialogManager>) => manager.openConfirm(target, "Confirm", "x".repeat(4_000))],
+    ["input", (manager: ReturnType<typeof createExtensionDialogManager>) => manager.openInput(target, "Input", "x".repeat(4_000))],
+  ] as const)("rejects oversized %s dialogs before transport", async (_kind, open) => {
+    const { manager, sendTextMessage } = createManager();
 
-    await expect(manager.openSelect(target, "Pick one", ["x".repeat(4_000)])).rejects.toThrow(
-      "Telegram select dialog exceeds the 4000-character message limit.",
-    );
+    await expect(open(manager)).rejects.toThrow(/exceeds the 4000-character message limit/);
     expect(sendTextMessage).not.toHaveBeenCalled();
     expect(manager.hasPending(target)).toBe(false);
+  });
+
+  it("bounds oversized terminal input confirmations while preserving the complete reply", async () => {
+    const { manager, editMessage } = createManager();
+    const title = "T".repeat(3_900);
+    const userText = "U".repeat(3_900);
+    const pendingInput = manager.openInput(target, title, "Reply in chat below.");
+    await Promise.resolve();
+
+    await expect(manager.consumeInput(target, userText)).resolves.toBe(true);
+
+    expect(String(editMessage.mock.calls.at(-1)?.[2]).length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
+    expect(String(editMessage.mock.calls.at(-1)?.[3]?.fallbackText).length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
+    expect(editMessage.mock.calls.at(-1)?.[3]?.replyMarkup).toBeUndefined();
+    await expect(pendingInput).resolves.toBe(userText);
   });
 
   it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(

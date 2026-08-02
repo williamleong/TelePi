@@ -106,6 +106,18 @@ export function createExtensionDialogManager(deps: {
     return extensionDialogCounter.toString(36);
   };
 
+  const assertDialogWithinLimit = (
+    kind: PendingExtensionDialog["kind"],
+    rendered: { text: string; fallbackText: string },
+  ): void => {
+    if (rendered.text.length > TELEGRAM_MESSAGE_LIMIT
+      || rendered.fallbackText.length > TELEGRAM_MESSAGE_LIMIT) {
+      throw new Error(
+        `Telegram ${kind} dialog exceeds the ${TELEGRAM_MESSAGE_LIMIT}-character message limit.`,
+      );
+    }
+  };
+
   const setPending = (contextKey: string, pendingDialog: PendingExtensionDialog): void => {
     pendingDialogs.set(contextKey, pendingDialog);
     dialogContextKeys.set(pendingDialog.dialogId, contextKey);
@@ -231,9 +243,7 @@ export function createExtensionDialogManager(deps: {
 
       const optionLines = options.map((option, index) => `${index + 1}. ${option}`);
       const rendered = renderDialogPanel(title, [...optionLines, "Use the buttons below."], "🧭");
-      if (rendered.text.length > TELEGRAM_MESSAGE_LIMIT || rendered.fallbackText.length > TELEGRAM_MESSAGE_LIMIT) {
-        throw new Error(`Telegram select dialog exceeds the ${TELEGRAM_MESSAGE_LIMIT}-character message limit.`);
-      }
+      assertDialogWithinLimit("select", rendered);
       const message = await deps.sendTextMessage(target, rendered.text, {
         parseMode: rendered.parseMode,
         fallbackText: rendered.fallbackText,
@@ -271,6 +281,7 @@ export function createExtensionDialogManager(deps: {
 
       const dialogId = nextExtensionDialogId();
       const rendered = renderDialogPanel(title, [message, "Choose Yes or No below."], "⚠️");
+      assertDialogWithinLimit("confirm", rendered);
       const telegramMessage = await deps.sendTextMessage(target, rendered.text, {
         parseMode: rendered.parseMode,
         fallbackText: rendered.fallbackText,
@@ -315,6 +326,7 @@ export function createExtensionDialogManager(deps: {
         [placeholder ?? "Reply in chat below.", placeholder ? "Reply in chat below." : ""].filter((line) => line.length > 0),
         "✍️",
       );
+      assertDialogWithinLimit("input", rendered);
       const telegramMessage = await deps.sendTextMessage(
         target,
         rendered.text,
@@ -357,11 +369,12 @@ export function createExtensionDialogManager(deps: {
 
       clearPending(contextKey);
       try {
-        await finalizePending(
-          target,
-          pendingDialog,
-          renderDialogPanel(pendingDialog.title, [`Received: ${userText}`], "✅"),
-        );
+        let rendered = renderDialogPanel(pendingDialog.title, [`Received: ${userText}`], "✅");
+        if (rendered.text.length > TELEGRAM_MESSAGE_LIMIT
+          || rendered.fallbackText.length > TELEGRAM_MESSAGE_LIMIT) {
+          rendered = renderDialogPanel(trimLine(pendingDialog.title, 256), ["Input received."], "✅");
+        }
+        await finalizePending(target, pendingDialog, rendered);
       } finally {
         pendingDialog.resolve(userText);
       }
