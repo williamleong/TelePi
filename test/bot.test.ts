@@ -334,6 +334,7 @@ function createMockPiSession(overrides: Partial<PiSessionService> = {}) {
       extensionBindings = bindings;
     }),
     prompt: vi.fn().mockResolvedValue(undefined),
+    steer: vi.fn().mockResolvedValue(undefined),
     setSessionName: vi.fn(),
     getSession: vi.fn().mockReturnValue({
       agent: { waitForIdle: vi.fn().mockResolvedValue(undefined) },
@@ -1740,6 +1741,147 @@ describe("createBot", () => {
       "/workspace/topic-one",
     );
     expect(registry.getSession(ALLOWED_CHAT_ID)?.service.switchSession).not.toHaveBeenCalled();
+  });
+
+  it("steers same-topic streaming text without creating a second Telegram prompt flow", async () => {
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        isStreaming: vi.fn().mockReturnValue(true),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "focus on the failing test" } }));
+
+    expect(pi.service.steer).toHaveBeenCalledWith("focus on the failing test");
+    expect(pi.service.prompt).not.toHaveBeenCalled();
+    expect(pi.service.subscribe).not.toHaveBeenCalled();
+    expect(api.sendChatAction).not.toHaveBeenCalled();
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Still working"))).toBe(false);
+  });
+
+  it("keeps streaming sessions isolated by forum topic", async () => {
+    const topicAKey = makeContextKey(ALLOWED_CHAT_ID, 101);
+    const topicBKey = makeContextKey(ALLOWED_CHAT_ID, 202);
+    const { bot, registry } = setupBot({
+      perContextSessionOverrides: {
+        [topicAKey]: { isStreaming: vi.fn().mockReturnValue(true) },
+        [topicBKey]: { isStreaming: vi.fn().mockReturnValue(false) },
+      },
+    });
+    await registry.registry.getOrCreate({ chatId: ALLOWED_CHAT_ID, messageThreadId: 101 });
+
+    await bot.handleUpdate(createTestUpdate({
+      message: {
+        text: "steer topic A",
+        chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+        message_thread_id: 101,
+      },
+    }));
+    await bot.handleUpdate(createTestUpdate({
+      message: {
+        text: "prompt topic B",
+        chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+        message_thread_id: 202,
+      },
+    }));
+    await nextTick();
+
+    expect(registry.getSession(ALLOWED_CHAT_ID, 101)?.service.steer).toHaveBeenCalledWith("steer topic A");
+    expect(registry.getSession(ALLOWED_CHAT_ID, 202)?.service.steer).not.toHaveBeenCalled();
+    expect(registry.getSession(ALLOWED_CHAT_ID, 202)?.service.prompt).toHaveBeenCalledWith("prompt topic B");
+  });
+
+  it("keeps the busy reply when local work owns the target", async () => {
+    let resolvePrompt!: () => void;
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        prompt: vi.fn().mockImplementation(
+          () => new Promise<void>((resolve) => {
+            resolvePrompt = resolve;
+          }),
+        ),
+        isStreaming: vi.fn().mockReturnValueOnce(false).mockReturnValue(true),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "start local work" } }));
+    await nextTick();
+    await bot.handleUpdate(createTestUpdate({ message: { text: "do not steer local work" } }));
+
+    expect(pi.service.steer).not.toHaveBeenCalled();
+    expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Still working on previous message...");
+
+    resolvePrompt();
+    await nextTick();
+  });
+
+  it("consumes extension input before considering active-stream steering", async () => {
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        isStreaming: vi.fn().mockReturnValueOnce(false).mockReturnValue(true),
+        listSlashCommands: vi.fn().mockResolvedValue([
+          { name: "ask", description: "Ask for input", source: "extension", path: "/ext/ask.ts" },
+        ]),
+      },
+    });
+    const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
+    promptMock.mockImplementation(async () => {
+      const value = await pi.getExtensionBindings()?.uiContext?.input("Name", "Your name");
+      pi.emitTextDelta(`hello ${value}`);
+      pi.emitAgentEnd();
+    });
+
+    const pending = bot.handleUpdate(createTestUpdate({ message: { text: "/ask" } }));
+    await nextTick();
+    await bot.handleUpdate(createTestUpdate({ message: { text: "Bene" } }));
+    await pending;
+
+    expect(pi.service.steer).not.toHaveBeenCalled();
+    expect(hasSentOrEditedText(api, "hello Bene")).toBe(true);
+  });
+
+  it("does not steer non-text updates or the busy prompt inbox", async () => {
+    vi.mocked(startPromptInboxPolling).mockClear();
+    const { bot, pi, api, registry } = setupBot({
+      configOverrides: { promptInboxDir: "/tmp/telepi-inbox" },
+      piSessionOverrides: {
+        isStreaming: vi.fn().mockReturnValue(true),
+        listSlashCommands: vi.fn().mockResolvedValue([
+          { name: "compact", description: "Compact", source: "extension", path: "/ext/compact.ts" },
+        ]),
+      },
+      perContextSessionOverrides: {
+        [makeContextKey(ALLOWED_USER_ID)]: { isStreaming: vi.fn().mockReturnValue(true) },
+      },
+    });
+    await registry.registry.getOrCreate({ chatId: ALLOWED_USER_ID });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/compact" } }));
+    await bot.handleUpdate(createPhotoUpdate());
+    await bot.handleUpdate(createDocumentUpdate());
+    await bot.handleUpdate(createVoiceUpdate());
+
+    const inboxOptions = vi.mocked(startPromptInboxPolling).mock.calls[0]?.[0];
+    expect(inboxOptions?.isBusy(inboxOptions.target)).toBe(true);
+    expect(pi.service.steer).not.toHaveBeenCalled();
+    expect(api.getFile).not.toHaveBeenCalled();
+  });
+
+  it("reports steering rejection once without disturbing the active Pi stream", async () => {
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        isStreaming: vi.fn().mockReturnValue(true),
+        steer: vi.fn().mockRejectedValue(new Error("queue unavailable")),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "focus on the failing test" } }));
+
+    expect(pi.service.steer).toHaveBeenCalledWith("focus on the failing test");
+    expect(pi.service.prompt).not.toHaveBeenCalled();
+    expect(pi.service.abort).not.toHaveBeenCalled();
+    expect(api.sendMessage.mock.calls.filter((call) => String(call[1]).includes("Steering failed"))).toHaveLength(1);
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("queue unavailable"))).toBe(true);
   });
 
   it("allows independent topics to process prompts concurrently", async () => {
@@ -4583,7 +4725,7 @@ describe("createBot", () => {
     ], undefined);
   });
 
-  it("blocks commands when piSession.isStreaming() returns true", async () => {
+  it("blocks control commands but steers ordinary text when piSession is streaming", async () => {
     const streaming = setupBot({
       piSessionOverrides: {
         isStreaming: vi.fn().mockReturnValue(true),
@@ -4610,9 +4752,12 @@ describe("createBot", () => {
     await streaming.bot.handleUpdate(createTestUpdate({ message: { text: "/label saved" } }));
     expect(streaming.api.sendMessage.mock.calls[5]?.[1]).toContain("Cannot label entries while a prompt is running.");
 
-    // text messages should be blocked
+    // Plain text steers the existing Pi run instead of creating a busy reply.
     await streaming.bot.handleUpdate(createTestUpdate({ message: { text: "hello there" } }));
-    expect(streaming.api.sendMessage.mock.calls[6]?.[1]).toContain("Still working on previous message...");
+    expect(streaming.pi.service.steer).toHaveBeenCalledWith("hello there");
+    expect(streaming.api.sendMessage.mock.calls.some(
+      (call) => String(call[1]).includes("Still working on previous message..."),
+    )).toBe(false);
 
     await streaming.bot.handleUpdate(createCallbackUpdate("tree_nav_branch111"));
     expect(streaming.api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", {

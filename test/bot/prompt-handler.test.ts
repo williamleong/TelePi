@@ -76,6 +76,10 @@ function createPromptHarness(options: {
   onSend?: (text: string, messageId: number) => Promise<void> | void;
   onEdit?: (text: string, messageId: number) => Promise<void> | void;
   onMarkup?: (messageId: number, hasAbort: boolean) => Promise<void> | void;
+  isBusy?: (target: { chatId: number }) => boolean;
+  taskRunnerResult?: "started" | "busy";
+  taskRunnerResults?: Array<"started" | "busy">;
+  trySteer?: (target: { chatId: number }, text: string) => Promise<boolean>;
 }) {
   const operations: TelegramOperation[] = [];
   const markupAttempts: Array<{ messageId: number; hasAbort: boolean }> = [];
@@ -84,7 +88,11 @@ function createPromptHarness(options: {
   let callbacks: PiSessionCallbacks | undefined;
   let nextMessageId = 0;
   let taskPromise: Promise<void> | undefined;
+  let taskStartCount = 0;
   const renameForumTopicToSessionName = vi.fn().mockResolvedValue(undefined);
+  const isBusy = vi.fn(options.isBusy ?? (() => false));
+  const trySteer = vi.fn(options.trySteer ?? (async () => false));
+  const sendBusyReply = vi.fn().mockResolvedValue(undefined);
 
   const record = (operation: TelegramOperation): void => {
     operations.push(operation);
@@ -187,19 +195,26 @@ function createPromptHarness(options: {
       },
   };
 
+  const taskRunner = {
+    tryStartPrompt: vi.fn((_target, _promptText, task) => {
+      const result = options.taskRunnerResults?.[taskStartCount++] ?? options.taskRunnerResult ?? "started";
+      if (result === "busy") {
+        return result;
+      }
+      taskPromise = task().catch(() => {});
+      return result;
+    }),
+  };
+
   const handler = createPromptHandler({
     bot: { api: botApi } as any,
     toolVerbosity: options.toolVerbosity ?? "summary",
     isActivityEnabled: () => options.activityEnabled ?? true,
     editDebounceMs: options.editDebounceMs ?? 0,
     typingIntervalMs: options.typingIntervalMs ?? 60_000,
-    isBusy: () => false,
-    taskRunner: {
-      tryStartPrompt(_target, _promptText, task) {
-        taskPromise = task().catch(() => {});
-        return "started";
-      },
-    },
+    isBusy,
+    taskRunner,
+    trySteer,
     ensureActiveSession: vi.fn(options.ensureActiveSession ?? (async () => fakePiSession)),
     syncChatScopedCommands: vi.fn(),
     refreshChatScopedCommands: vi.fn(),
@@ -208,7 +223,7 @@ function createPromptHarness(options: {
       trackCallbackMessages.push(messageId);
     },
     renameForumTopicToSessionName,
-    sendBusyReply: vi.fn(),
+    sendBusyReply,
   });
 
   return {
@@ -217,6 +232,10 @@ function createPromptHarness(options: {
     operations,
     renameForumTopicToSessionName,
     trackCallbackMessages,
+    isBusy,
+    trySteer,
+    taskRunner,
+    sendBusyReply,
     task: () => taskPromise,
     waitForOperation,
     run: (waitForCompletion = true) => handler(
@@ -227,10 +246,129 @@ function createPromptHarness(options: {
       undefined,
       { waitForCompletion },
     ),
+    runInput: ({
+      text = "prompt",
+      preloadedSlashCommands,
+      images,
+      waitForCompletion = true,
+    }: {
+      text?: string;
+      preloadedSlashCommands?: any[];
+      images?: any[];
+      waitForCompletion?: boolean;
+    }) => handler(
+      { api: botApi } as any,
+      { chatId: 123 },
+      text,
+      preloadedSlashCommands,
+      images,
+      { waitForCompletion },
+    ),
   };
 }
 
 describe("prompt handler", () => {
+  it("steers ordinary text at the initial busy gate without creating a prompt flow", async () => {
+    const harness = createPromptHarness({
+      isBusy: () => true,
+      trySteer: vi.fn().mockResolvedValue(true),
+    });
+
+    await expect(harness.runInput({ text: "check the logs" })).resolves.toBe(true);
+
+    expect(harness.trySteer).toHaveBeenCalledWith({ chatId: 123 }, "check the logs");
+    expect(harness.sendBusyReply).not.toHaveBeenCalled();
+    expect(harness.taskRunner.tryStartPrompt).not.toHaveBeenCalled();
+    expect(harness.operations).toEqual([]);
+  });
+
+  it("steers when task reservation discovers an active prompt", async () => {
+    const harness = createPromptHarness({
+      taskRunnerResult: "busy",
+      trySteer: vi.fn().mockResolvedValue(true),
+    });
+
+    await expect(harness.runInput({ text: "check the logs" })).resolves.toBe(true);
+
+    expect(harness.taskRunner.tryStartPrompt).toHaveBeenCalledTimes(1);
+    expect(harness.trySteer).toHaveBeenCalledWith({ chatId: 123 }, "check the logs");
+    expect(harness.sendBusyReply).not.toHaveBeenCalled();
+    expect(harness.operations).toEqual([]);
+  });
+
+  it("delivers later Pi deltas through the original chronological flow after steering", async () => {
+    const promptRelease = deferred();
+    const promptStarted = deferred<PiSessionCallbacks>();
+    const harness = createPromptHarness({
+      taskRunnerResults: ["started", "busy"],
+      trySteer: vi.fn().mockResolvedValue(true),
+      onPrompt: async (callbacks) => {
+        promptStarted.resolve(callbacks);
+        await promptRelease.promise;
+      },
+    });
+
+    await expect(harness.run(false)).resolves.toBe(true);
+    const callbacks = await promptStarted.promise;
+    callbacks.onTextDelta("original output");
+    await harness.waitForOperation((operation) => operation.kind === "send" && operation.text.includes("original output"));
+
+    await expect(harness.runInput({ text: "focus on the tests", waitForCompletion: false })).resolves.toBe(true);
+    callbacks.onTextDelta(" after steering");
+    promptRelease.resolve();
+    await harness.task();
+
+    expect(harness.taskRunner.tryStartPrompt).toHaveBeenCalledTimes(2);
+    expect(harness.operations.some(
+      (operation) => (operation.kind === "send" || operation.kind === "edit")
+        && operation.text.includes("original output after steering"),
+    )).toBe(true);
+  });
+
+  it("keeps the busy reply when text steering is unavailable", async () => {
+    const harness = createPromptHarness({
+      isBusy: () => true,
+      trySteer: vi.fn().mockResolvedValue(false),
+    });
+
+    await expect(harness.runInput({ text: "check the logs" })).resolves.toBe(false);
+
+    expect(harness.trySteer).toHaveBeenCalledWith({ chatId: 123 }, "check the logs");
+    expect(harness.sendBusyReply).toHaveBeenCalledTimes(1);
+    expect(harness.taskRunner.tryStartPrompt).not.toHaveBeenCalled();
+  });
+
+  it("reports steering failures without starting a second prompt flow", async () => {
+    const harness = createPromptHarness({
+      isBusy: () => true,
+      trySteer: vi.fn().mockRejectedValue(new Error("queue unavailable")),
+    });
+
+    await expect(harness.runInput({ text: "check the logs" })).resolves.toBe(true);
+
+    expect(harness.taskRunner.tryStartPrompt).not.toHaveBeenCalled();
+    expect(harness.sendBusyReply).not.toHaveBeenCalled();
+    expect(harness.operations).toEqual([
+      expect.objectContaining({ kind: "send", text: expect.stringContaining("Steering failed"), }),
+    ]);
+  });
+
+  it.each([
+    ["Pi slash commands", { preloadedSlashCommands: [] }],
+    ["image prompts", { images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }] }],
+  ])("keeps the busy reply for %s instead of steering", async (_kind, input) => {
+    const harness = createPromptHarness({
+      isBusy: () => true,
+      trySteer: vi.fn().mockResolvedValue(true),
+    });
+
+    await expect(harness.runInput(input)).resolves.toBe(false);
+
+    expect(harness.trySteer).not.toHaveBeenCalled();
+    expect(harness.sendBusyReply).toHaveBeenCalledTimes(1);
+    expect(harness.taskRunner.tryStartPrompt).not.toHaveBeenCalled();
+  });
+
   it("waits for completion when requested", async () => {
     const promptRelease = deferred();
     const promptStarted = deferred();

@@ -669,6 +669,17 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     trackCallbackMessage: registerCallbackMessageContext,
     renameForumTopicToSessionName,
     sendBusyReply,
+    trySteer: async (target, text) => {
+      if (chatState.isLocallyBusy(target)) {
+        return false;
+      }
+      const piSession = getExistingSession(target);
+      if (!piSession?.isStreaming()) {
+        return false;
+      }
+      await piSession.steer(text);
+      return true;
+    },
   });
 
   if (config.promptInboxDir) {

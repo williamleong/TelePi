@@ -11,6 +11,7 @@ import {
   renderAssistantSegment,
   renderExtensionError,
   renderExtensionNotice,
+  renderPrefixedError,
   renderPromptFailure,
   renderToolEndMessage,
   renderToolStartMessage,
@@ -60,9 +61,10 @@ interface CreatePromptHandlerOptions {
   trackCallbackMessage?: (target: PiSessionContext, messageId: number) => void;
   renameForumTopicToSessionName?: (target: PiSessionContext, info: PiSessionInfo) => Promise<void>;
   sendBusyReply: (ctx: Context) => Promise<void>;
+  trySteer: (target: PiSessionContext, text: string) => Promise<boolean>;
 }
 
-type PromptFlowDeps = Omit<CreatePromptHandlerOptions, "isBusy" | "taskRunner" | "sendBusyReply">;
+type PromptFlowDeps = Omit<CreatePromptHandlerOptions, "isBusy" | "taskRunner" | "sendBusyReply" | "trySteer">;
 
 type PromptTaskOutcome = "completed" | "failed";
 
@@ -692,8 +694,22 @@ export function createPromptHandler(options: CreatePromptHandlerOptions): Handle
     isBusy,
     taskRunner,
     sendBusyReply,
+    trySteer,
     ...promptFlowDeps
   } = options;
+
+  const acceptSteering = async (ctx: Context, target: PiSessionContext, text: string): Promise<boolean> => {
+    try {
+      return await trySteer(target, text);
+    } catch (error) {
+      const failure = renderPrefixedError("Steering failed", error);
+      await safeReply(ctx, failure.text, {
+        fallbackText: failure.fallbackText,
+        parseMode: failure.parseMode,
+      }, target);
+      return true;
+    }
+  };
 
   return async (
     ctx: Context,
@@ -703,7 +719,11 @@ export function createPromptHandler(options: CreatePromptHandlerOptions): Handle
     images?: ImageContent[],
     options?: HandleUserPromptOptions,
   ): Promise<boolean> => {
+    const steerableInput = preloadedSlashCommands === undefined && (!images || images.length === 0);
     if (isBusy(target)) {
+      if (steerableInput && await acceptSteering(ctx, target, userText)) {
+        return true;
+      }
       await sendBusyReply(ctx);
       return false;
     }
@@ -718,6 +738,9 @@ export function createPromptHandler(options: CreatePromptHandlerOptions): Handle
       },
     );
     if (result === "busy") {
+      if (steerableInput && await acceptSteering(ctx, target, userText)) {
+        return true;
+      }
       await sendBusyReply(ctx);
       return false;
     }
