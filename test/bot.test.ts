@@ -681,17 +681,17 @@ async function nextTick(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function getNonWorkingSendMessageCalls(api: ReturnType<typeof setupBot>["api"]): any[] {
-  return api.sendMessage.mock.calls.filter((call) => !String(call[1]).includes("Working"));
+function getSendMessageCalls(api: ReturnType<typeof setupBot>["api"]): any[] {
+  return api.sendMessage.mock.calls;
 }
 
 function getReplyMarkupData(api: ReturnType<typeof setupBot>["api"], callIndex = 0): string[] {
-  const markup = getNonWorkingSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
+  const markup = getSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
   return markup?.inline_keyboard?.flat().map((button: any) => button.callback_data) ?? [];
 }
 
 function getReplyMarkupTexts(api: ReturnType<typeof setupBot>["api"], callIndex = 0): string[] {
-  const markup = getNonWorkingSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
+  const markup = getSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
   return markup?.inline_keyboard?.flat().map((button: any) => button.text) ?? [];
 }
 
@@ -699,7 +699,7 @@ function getReplyMarkupButtons(
   api: ReturnType<typeof setupBot>["api"],
   callIndex = 0,
 ): Array<{ text: string; callback_data: string }> {
-  const markup = getNonWorkingSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
+  const markup = getSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
   return markup?.inline_keyboard?.flat() ?? [];
 }
 
@@ -964,17 +964,12 @@ describe("createBot", () => {
     ].join("\n");
     expect(disabledDelivery).not.toContain("Thinking");
     expect(disabledDelivery).toContain("read");
-    const disabledStatusCallIndex = api.sendMessage.mock.calls.findIndex((call) => String(call[1]).includes("Working"));
     const disabledAssistantCallIndex = api.sendMessage.mock.calls.findIndex(
       (call) => String(call[1]).includes("topic seven answer"),
     );
-    const disabledStatus = await api.sendMessage.mock.results[disabledStatusCallIndex]?.value;
-    const disabledAssistant = await api.sendMessage.mock.results[disabledAssistantCallIndex]?.value;
-    expect(disabledAssistantCallIndex).toBeGreaterThan(disabledStatusCallIndex);
-    expect(disabledAssistant.message_id).toBeGreaterThan(disabledStatus.message_id);
-    expect(api.editMessageText.mock.calls.some(
-      (call) => call[1] === disabledStatus.message_id && String(call[2]).includes("topic seven answer"),
-    )).toBe(false);
+    expect(disabledAssistantCallIndex).toBe(0);
+    expect(JSON.stringify(api.sendMessage.mock.calls[disabledAssistantCallIndex]?.[2]?.reply_markup)).toContain("pi_abort");
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(false);
 
     api.sendMessage.mockClear();
     api.editMessageText.mockClear();
@@ -986,18 +981,17 @@ describe("createBot", () => {
     ].join("\n");
     expect(defaultDelivery).toContain("Thinking");
     expect(defaultDelivery).toContain("topic eight answer");
-    const topicBStatusCallIndex = api.sendMessage.mock.calls.findIndex((call) => String(call[1]).includes("Working"));
     const topicBThinkingCallIndex = api.sendMessage.mock.calls.findIndex((call) => String(call[1]).includes("Thinking"));
     const topicBAssistantCallIndex = api.sendMessage.mock.calls.findIndex(
       (call) => String(call[1]).includes("topic eight answer"),
     );
-    const topicBStatus = await api.sendMessage.mock.results[topicBStatusCallIndex]?.value;
     const topicBThinking = await api.sendMessage.mock.results[topicBThinkingCallIndex]?.value;
     const topicBAssistant = await api.sendMessage.mock.results[topicBAssistantCallIndex]?.value;
-    expect(topicBThinkingCallIndex).toBeGreaterThan(topicBStatusCallIndex);
+    expect(topicBThinkingCallIndex).toBe(0);
     expect(topicBAssistantCallIndex).toBeGreaterThan(topicBThinkingCallIndex);
-    expect(topicBThinking.message_id).toBeGreaterThan(topicBStatus.message_id);
+    expect(JSON.stringify(api.sendMessage.mock.calls[topicBThinkingCallIndex]?.[2]?.reply_markup)).toContain("pi_abort");
     expect(topicBAssistant.message_id).toBeGreaterThan(topicBThinking.message_id);
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(false);
 
     await bot.handleUpdate(topic("/activity on", 7));
     api.sendMessage.mockClear();
@@ -1403,6 +1397,31 @@ describe("createBot", () => {
     expect(failure.api.sendMessage.mock.calls[0]?.[1]).toContain("abort failed");
   });
 
+  it("aborts the active session before it has delivered output", async () => {
+    let resolvePrompt!: () => void;
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        prompt: vi.fn().mockImplementation(
+          () => new Promise<void>((resolve) => {
+            resolvePrompt = resolve;
+          }),
+        ),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "start streaming" } }));
+    await vi.waitFor(() => {
+      expect(pi.service.prompt).toHaveBeenCalledTimes(1);
+    });
+    expect(api.sendMessage).not.toHaveBeenCalled();
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/abort" } }));
+    expect(pi.service.abort).toHaveBeenCalledTimes(1);
+
+    resolvePrompt();
+    await nextTick();
+  });
+
   it("does not create a fresh session for /abort in an untouched context", async () => {
     const { bot, api, registry } = setupBot();
 
@@ -1449,11 +1468,10 @@ describe("createBot", () => {
         },
       }),
     );
-    await vi.waitFor(() => {
-      expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(true);
-    });
-
     const topicSession = registry.getSession(ALLOWED_CHAT_ID, 101)!;
+    await vi.waitFor(() => {
+      expect(topicSession.service.prompt).toHaveBeenCalledTimes(1);
+    });
     topicSession.emitTextDelta("first streamed output");
     await vi.waitFor(() => {
       expect(api.sendMessage.mock.calls.some(
@@ -1465,11 +1483,8 @@ describe("createBot", () => {
     );
     const output = await api.sendMessage.mock.results[outputCallIndex]?.value;
     const outputMessageId = output.message_id;
-    await vi.waitFor(() => {
-      expect(api.editMessageReplyMarkup.mock.calls.some(
-        (call) => call[1] === outputMessageId && JSON.stringify(call[2]).includes("pi_abort"),
-      )).toBe(true);
-    });
+    expect(JSON.stringify(api.sendMessage.mock.calls[outputCallIndex]?.[2]?.reply_markup)).toContain("pi_abort");
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(false);
 
     await bot.handleUpdate(
       createCallbackUpdate("pi_abort", {
@@ -2703,21 +2718,15 @@ describe("createBot", () => {
       expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Hello world"))).toBe(true);
     });
 
-    const statusCallIndex = api.sendMessage.mock.calls.findIndex((call) => String(call[1]).includes("Working"));
     const assistantCallIndex = api.sendMessage.mock.calls.findIndex((call) => String(call[1]).includes("Hello world"));
-    const status = await api.sendMessage.mock.results[statusCallIndex]?.value;
-    const assistant = await api.sendMessage.mock.results[assistantCallIndex]?.value;
 
     expect(pi.service.subscribe).toHaveBeenCalledTimes(1);
     expect(pi.service.prompt).toHaveBeenCalledWith("continue please");
     expect(api.sendChatAction).toHaveBeenCalled();
-    expect(statusCallIndex).toBeGreaterThanOrEqual(0);
-    expect(assistantCallIndex).toBeGreaterThan(statusCallIndex);
-    expect(assistant.message_id).toBeGreaterThan(status.message_id);
+    expect(assistantCallIndex).toBe(0);
+    expect(JSON.stringify(api.sendMessage.mock.calls[assistantCallIndex]?.[2]?.reply_markup)).toContain("pi_abort");
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(false);
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Running:"))).toBe(true);
-    expect(api.editMessageText.mock.calls.some(
-      (call) => call[1] === status.message_id && String(call[2]).includes("Hello world"),
-    )).toBe(false);
   });
 
   it("finalizes rich Markdown assistant responses through Telegram rich messages", async () => {
@@ -2741,15 +2750,12 @@ describe("createBot", () => {
       expect(api.sendRichMessage).toHaveBeenCalledTimes(1);
     });
 
-    const status = await api.sendMessage.mock.results[0]?.value;
     const assistant = await api.sendRichMessage.mock.results[0]?.value;
-    expect(status.text).toContain("Working");
-    expect(assistant.message_id).toBeGreaterThan(status.message_id);
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(false);
+    expect(assistant.message_id).toBe(1);
+    expect(JSON.stringify(api.sendRichMessage.mock.calls[0]?.[2]?.reply_markup)).toContain("pi_abort");
     expect(api.sendRichMessage.mock.calls[0]?.[1].markdown).toContain("# Report");
     expect(api.sendRichMessage.mock.calls[0]?.[1].markdown).toContain("| Metric | Value |");
-    expect(api.editMessageText.mock.calls.some(
-      (call) => call[1] === status.message_id && call[2]?.markdown?.includes("# Report"),
-    )).toBe(false);
   });
 
   it("bridges discovered Pi slash commands into the prompt flow", async () => {
@@ -4449,16 +4455,13 @@ describe("createBot", () => {
       expect(delivery).not.toContain("hidden thinking");
 
       if (toolVerbosity === "summary") {
-        const statusCallIndex = flow.api.sendMessage.mock.calls.findIndex((call) => String(call[1]).includes("Working"));
-        const status = await flow.api.sendMessage.mock.results[statusCallIndex]?.value;
         const sentMessages = await Promise.all(flow.api.sendMessage.mock.results.map((result) => result.value));
-        const outputMessages = sentMessages.filter((message) => message?.message_id !== status.message_id);
         const messageTexts = new Map<number, string>();
-        for (const message of outputMessages) {
+        for (const message of sentMessages) {
           messageTexts.set(message.message_id, String(message.text ?? ""));
         }
         for (const call of flow.api.editMessageText.mock.calls) {
-          if (typeof call[1] === "number" && call[1] !== status.message_id) {
+          if (typeof call[1] === "number") {
             messageTexts.set(call[1], String(call[2]));
           }
         }
@@ -4467,8 +4470,9 @@ describe("createBot", () => {
         const summaryMessage = [...messageTexts.entries()].find(([, text]) => text.includes(summaryText));
         expect(summaryMessage).toBeDefined();
         expect(summaryMessage?.[1]).toContain("Final answer");
-        expect(summaryMessage?.[0]).toBeGreaterThan(status.message_id);
-        expect(messageTexts.get(status.message_id) ?? "").not.toContain(summaryText);
+        expect(summaryMessage?.[0]).toBeGreaterThanOrEqual(1);
+        expect(JSON.stringify(flow.api.sendMessage.mock.calls[0]?.[2]?.reply_markup)).toContain("pi_abort");
+        expect(flow.api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(false);
         return;
       }
 
@@ -4497,7 +4501,7 @@ describe("createBot", () => {
       throw new Error("prompt failed");
     });
     await failure.bot.handleUpdate(createTestUpdate({ message: { text: "break" } }));
-    expect(failure.api.editMessageText.mock.calls.some((call) => String(call[2]).includes("⚠️ prompt failed"))).toBe(
+    expect(failure.api.sendMessage.mock.calls.some((call) => String(call[1]).includes("⚠️ prompt failed"))).toBe(
       true,
     );
 
@@ -4508,7 +4512,7 @@ describe("createBot", () => {
       throw new Error("Abort requested");
     });
     await aborted.bot.handleUpdate(createTestUpdate({ message: { text: "stop" } }));
-    expect(aborted.api.editMessageText.mock.calls.some((call) => String(call[2]).includes("⏹ Aborted"))).toBe(
+    expect(aborted.api.sendMessage.mock.calls.some((call) => String(call[1]).includes("⏹ Aborted"))).toBe(
       true,
     );
   });
@@ -4616,7 +4620,7 @@ describe("createBot", () => {
     });
   });
 
-  it("sends '✅ Done' when agent ends with no text output", async () => {
+  it("sends no status message when an agent ends with no text output", async () => {
     const { bot, pi, api } = setupBot();
     const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
     promptMock.mockImplementation(async () => {
@@ -4626,7 +4630,8 @@ describe("createBot", () => {
 
     await bot.handleUpdate(createTestUpdate({ message: { text: "do something silent" } }));
 
-    expect(hasSentOrEditedText(api, "✅ Done")).toBe(true);
+    expect(api.sendMessage).not.toHaveBeenCalled();
+    expect(api.editMessageText).not.toHaveBeenCalled();
   });
 
   it("handles in-memory handback (no sessionFile)", async () => {
