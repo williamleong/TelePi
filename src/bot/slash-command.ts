@@ -13,6 +13,7 @@ export const TELEPI_BOT_COMMANDS = [
   { command: "commands", description: "Browse TelePi and Pi commands" },
   { command: "new", description: "Start a new session" },
   { command: "retry", description: "Retry the last prompt in this chat/topic" },
+  { command: "activity", description: "Toggle activity details (/activity on|off)" },
   { command: "handback", description: "Hand session back to Pi CLI" },
   { command: "abort", description: "Cancel current operation" },
   { command: "session", description: "Current session details" },

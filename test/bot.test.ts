@@ -903,6 +903,39 @@ describe("createBot", () => {
     expect(pi.service.prompt).toHaveBeenNthCalledWith(2, "retry me");
   });
 
+  it("reports and changes activity for the current topic", async () => {
+    const { bot, api } = setupBot();
+    const topic = (text: string, messageThreadId: number) => createTestUpdate({
+      message: {
+        text,
+        chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+        message_thread_id: messageThreadId,
+      },
+    });
+
+    await bot.handleUpdate(topic("/activity", 7));
+    expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Activity details: on");
+
+    await bot.handleUpdate(topic("/activity off", 7));
+    expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Activity details: off");
+
+    await bot.handleUpdate(topic("/activity", 8));
+    expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Activity details: on");
+
+    await bot.handleUpdate(topic("/activity on", 7));
+    expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Activity details: on");
+  });
+
+  it("rejects invalid activity arguments without creating a Pi session", async () => {
+    const { bot, api, registry } = setupBot();
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/activity maybe" } }));
+
+    expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Usage: /activity on|off");
+    expect(registry.registry.get).not.toHaveBeenCalled();
+    expect(registry.registry.getOrCreate).not.toHaveBeenCalled();
+  });
+
   it("keeps /retry state isolated per topic", async () => {
     const { bot, api } = setupBot();
 
@@ -4171,6 +4204,7 @@ describe("createBot", () => {
       { command: "commands", description: "Browse TelePi and Pi commands" },
       { command: "new", description: "Start a new session" },
       { command: "retry", description: "Retry the last prompt in this chat/topic" },
+      { command: "activity", description: "Toggle activity details (/activity on|off)" },
       { command: "handback", description: "Hand session back to Pi CLI" },
       { command: "abort", description: "Cancel current operation" },
       { command: "session", description: "Current session details" },

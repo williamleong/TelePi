@@ -6,6 +6,7 @@ import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 
 import {
   TELEPI_BOT_COMMANDS,
+  TELEPI_LOCAL_COMMAND_NAMES,
   buildChatScopedCommands,
   buildChatScopedCommandSignature,
   buildCommandPickerEntries,
@@ -185,6 +186,19 @@ describe("bot slash-command helpers", () => {
       expect.objectContaining({ kind: "pi", name: "deploy", label: "🧩 /deploy" }),
       expect.objectContaining({ kind: "pi", name: "agentic", label: "⚡ /agentic" }),
     ]);
+  });
+
+  it("includes activity in the picker and chat-scoped command catalogs", () => {
+    const entries = buildCommandPickerEntries([]);
+    const commands = buildChatScopedCommands([]);
+
+    expect(entries).toContainEqual(expect.objectContaining({
+      kind: "telepi",
+      command: "activity",
+      commandText: "/activity",
+    }));
+    expect(commands).toContainEqual(expect.objectContaining({ command: "activity" }));
+    expect(TELEPI_LOCAL_COMMAND_NAMES).toContain("activity");
   });
 
   it("uses direct argumentHint metadata without needing prompt file reads", () => {
