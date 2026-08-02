@@ -227,7 +227,7 @@ node dist/cli.js start
 | `/branch <id>` | Navigate to a specific entry ID (with confirmation) |
 | `/label [args]` | Add or clear labels on entries for easy reference |
 
-Sessions, inline keyboards, `/retry` state, and active topic-name mappings are isolated per Telegram chat/topic, so forum topics can be used independently without colliding with each other.
+Sessions, inline keyboards, `/retry` state, and active topic-name mappings are isolated per Telegram chat/topic, so forum topics can be used independently without colliding with each other. Active Pi session associations persist across TelePi restarts, so an existing topic resumes its last active Pi session. `/handback` forgets that association; if its saved JSONL session file is missing, TelePi starts a new session for the topic.
 
 `/commands` now opens a mobile-friendly inline picker with pagination plus `All`, `TelePi`, and `Pi` filters. Tapping a TelePi entry runs the built-in command immediately, and tapping a Pi entry forwards the slash command into the active Pi session. Telegram-compatible discovered Pi commands (for example `/review` or `/compact`) are also synced into Telegram's native slash-command interface for the current chat. Commands that Telegram cannot represent, such as `/skill:browser-tools`, stay available through the picker and by manual typing.
 

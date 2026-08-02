@@ -4,6 +4,7 @@ import path from "node:path";
 export const DOCKER_WORKSPACE_PATH = "/workspace";
 const DEFAULT_CONFIG_DIRNAME = path.join(".config", "telepi");
 const DEFAULT_CONFIG_FILENAME = "config.env";
+const DEFAULT_TOPIC_SESSION_STATE_FILENAME = "topic-sessions.json";
 
 export function getHomeDirectory(): string {
   return process.env.HOME?.trim() || homedir();
@@ -53,4 +54,30 @@ export function getDefaultLogDir(
   }
 
   return path.join(homeDirectory, ".local", "state", "telepi", "logs");
+}
+
+export function getDefaultTelePiStateDir(
+  homeDirectory: string = getHomeDirectory(),
+  platform: "darwin" | "linux" = process.platform === "darwin" ? "darwin" : "linux",
+  xdgStateHome?: string,
+): string {
+  if (platform === "darwin") {
+    return path.join(homeDirectory, "Library", "Application Support", "TelePi");
+  }
+
+  return path.join(
+    xdgStateHome?.trim() || process.env.XDG_STATE_HOME?.trim() || path.join(homeDirectory, ".local", "state"),
+    "telepi",
+  );
+}
+
+export function getDefaultTopicSessionStatePath(
+  homeDirectory: string = getHomeDirectory(),
+  platform: "darwin" | "linux" = process.platform === "darwin" ? "darwin" : "linux",
+  xdgStateHome?: string,
+): string {
+  return path.join(
+    getDefaultTelePiStateDir(homeDirectory, platform, xdgStateHome),
+    DEFAULT_TOPIC_SESSION_STATE_FILENAME,
+  );
 }
