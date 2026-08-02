@@ -132,7 +132,6 @@ async function runPromptFlow(
   const streamSegments = createStreamSegments();
   const toolStates = new Map<string, ToolState>();
   const toolCounts = new Map<string, number>();
-  let summaryToolAssistantBoundary: { id: number; revision: number } | undefined;
   const dialogBackedToolCallIds = new Set<string>();
   let abortOwnerMessageId: number | undefined;
   const abortOwnerMessageIds = new Set<number>();
@@ -648,13 +647,7 @@ async function runPromptFlow(
     const lastAssistant = [...streamSegments.getSegments()].reverse().find(
       (segment) => segment.kind === "assistant",
     );
-    const followsAssistantBeforeSummaryTool = lastAssistant
-      && summaryToolAssistantBoundary?.id === lastAssistant.id
-      && summaryToolAssistantBoundary.revision === lastAssistant.revision;
-    if (!lastAssistant || lastAssistant.sealed || followsAssistantBeforeSummaryTool) {
-      if (followsAssistantBeforeSummaryTool) {
-        lastAssistant.sealed = true;
-      }
+    if (!lastAssistant || lastAssistant.sealed) {
       streamSegments.appendAssistantText(summary);
       return;
     }
@@ -817,12 +810,9 @@ async function runPromptFlow(
         return;
       }
 
+      streamSegments.sealAssistantSegment();
       if (toolVerbosity === "summary") {
         toolCounts.set(toolName, (toolCounts.get(toolName) ?? 0) + 1);
-        const lastSegment = streamSegments.getSegments().at(-1);
-        summaryToolAssistantBoundary = lastSegment?.kind === "assistant"
-          ? { id: lastSegment.id, revision: lastSegment.revision }
-          : undefined;
         return;
       }
       if (toolVerbosity === "none") {

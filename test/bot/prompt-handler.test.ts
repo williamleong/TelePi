@@ -1608,6 +1608,45 @@ describe("prompt handler", () => {
     }
   });
 
+  it("keeps post-tool text and its summary out of the delivered pre-tool message", async () => {
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      activityEnabled: false,
+      toolVerbosity: "summary",
+      onPrompt: async (callbacks) => {
+        callbacks.onTextDelta("I'll inspect first.");
+        await harness.waitForOperation(
+          (operation) => operation.kind === "edit"
+            && operation.messageId === 1
+            && operation.text.includes("I'll inspect first."),
+        );
+        callbacks.onToolStart("read", "tool-1", { path: "src/index.ts" });
+        callbacks.onToolEnd("tool-1", false);
+        callbacks.onTextDelta("I found it.");
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+
+    const assistantOperations = harness.operations.filter(
+      (operation): operation is Extract<TelegramOperation, { kind: "send" | "edit" }> =>
+        (operation.kind === "send" || operation.kind === "edit")
+        && operation.text.includes("Assistant"),
+    );
+    const preToolOperation = assistantOperations.find(
+      (operation) => operation.text.includes("I'll inspect first."),
+    );
+    const postToolOperation = assistantOperations.find(
+      (operation) => operation.text.includes("I found it.") && operation.text.includes("🔧 1 tool used: read"),
+    );
+
+    expect(preToolOperation).toBeDefined();
+    expect(postToolOperation).toBeDefined();
+    expect(preToolOperation?.text).not.toContain("I found it.");
+    expect(preToolOperation?.text).not.toContain("🔧 1 tool used: read");
+    expect(postToolOperation?.messageId).not.toBe(preToolOperation?.messageId);
+  });
+
   it("emits a tool summary after a sealed assistant segment", async () => {
     const harness = createPromptHarness({
       activityEnabled: false,
