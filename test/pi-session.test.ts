@@ -2343,11 +2343,42 @@ describe("PiSessionService", () => {
   });
 
   it.each([
-    ["directory", () => Object.assign(new Error("EISDIR: illegal operation on a directory"), { code: "EISDIR" })],
-    ["malformed file", (savedPath: string) => new Error(`Session file is not a valid pi session: ${savedPath}`)],
+    [
+      "filesystem error for a different path",
+      () => Object.assign(new Error("EACCES: permission denied"), { code: "EACCES", path: "/tmp/other.jsonl" }),
+    ],
+    [
+      "malformed-session error for a different path",
+      (savedPath: string) => new Error(`Session file is not a valid pi session: ${savedPath}.other`),
+    ],
+  ])("retains a saved session for an unrelated %s", async (_label, createRestoreError) => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "telepi-registry-"));
+    const savedPath = path.join(tempDir, "saved.jsonl");
+    const store = TopicSessionStore.memory();
+    writeFileSync(savedPath, "{}\\n");
+    store.set("1::99", { sessionFile: savedPath, workspace: tempDir });
+    mockState.SessionManager.open.mockImplementationOnce(() => {
+      throw createRestoreError(savedPath);
+    });
+
+    try {
+      const registry = await PiSessionRegistry.create(createConfig(), store);
+
+      await expect(registry.getOrCreate({ chatId: 1, messageThreadId: 99 })).rejects.toThrow();
+      expect(store.get("1::99")).toEqual({ sessionFile: savedPath, workspace: tempDir });
+      expect(mockState.SessionManager.create).not.toHaveBeenCalled();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["directory", (runtimePath: string) => Object.assign(new Error("EISDIR: illegal operation on a directory"), { code: "EISDIR", path: runtimePath })],
+    ["malformed file", (runtimePath: string) => new Error(`Session file is not a valid pi session: ${runtimePath}`)],
   ])("replaces an invalid saved %s with a new session", async (_label, createRestoreError) => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "telepi-registry-"));
     const savedPath = path.join(tempDir, "saved.jsonl");
+    const runtimePath = path.join(tempDir, "runtime-saved.jsonl");
     const store = TopicSessionStore.memory();
 
     if (_label === "directory") {
@@ -2355,8 +2386,9 @@ describe("PiSessionService", () => {
     } else {
       writeFileSync(savedPath, "not valid JSONL\\n");
     }
+    mockState.setResolvedSessionPath(savedPath, runtimePath);
     store.set("1::99", { sessionFile: savedPath, workspace: tempDir });
-    const restoreError = createRestoreError(savedPath);
+    const restoreError = createRestoreError(runtimePath);
     mockState.SessionManager.open.mockImplementationOnce(() => {
       throw restoreError;
     });
@@ -2365,6 +2397,7 @@ describe("PiSessionService", () => {
       const registry = await PiSessionRegistry.create(createConfig(), store);
       const service = await registry.getOrCreate({ chatId: 1, messageThreadId: 99 });
 
+      expect(mockState.SessionManager.open).toHaveBeenCalledWith(runtimePath, undefined, tempDir);
       expect(service).toBe(registry.get({ chatId: 1, messageThreadId: 99 }));
       expect(mockState.SessionManager.create).toHaveBeenCalledWith("/workspace/base");
       expect(store.get("1::99")).toEqual({

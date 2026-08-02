@@ -1495,6 +1495,7 @@ export class PiSessionRegistry {
     }
 
     const workspace = this.resolveSavedWorkspace(key, saved.sessionFile, saved.workspace);
+    const runtimeSessionPath = resolveSessionPathForRuntime(saved.sessionFile);
     return {
       config: {
         ...this.config,
@@ -1503,7 +1504,7 @@ export class PiSessionRegistry {
         piSessionPath: saved.sessionFile,
       },
       workspaceOverride: workspace,
-      restoredSessionFile: saved.sessionFile,
+      restoredSessionFile: runtimeSessionPath,
     };
   }
 
@@ -1536,15 +1537,18 @@ export class PiSessionRegistry {
   }
 }
 
-function isInvalidSavedSessionError(error: unknown, sessionFile: string): boolean {
-  if (error instanceof Error && error.message.startsWith("Session file is not a valid pi session:")) {
-    return error.message.includes(sessionFile);
+function isInvalidSavedSessionError(error: unknown, runtimeSessionPath: string): boolean {
+  if (error instanceof Error && error.message === `Session file is not a valid pi session: ${runtimeSessionPath}`) {
+    return true;
   }
   if (!error || typeof error !== "object") {
     return false;
   }
-  const code = (error as NodeJS.ErrnoException).code;
-  return code === "EISDIR" || code === "ENOTDIR" || code === "EACCES";
+  const filesystemError = error as NodeJS.ErrnoException;
+  return (
+    (filesystemError.code === "EISDIR" || filesystemError.code === "ENOTDIR" || filesystemError.code === "EACCES")
+    && filesystemError.path === runtimeSessionPath
+  );
 }
 
 function normalizeNewSessionOptions(
