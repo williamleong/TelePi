@@ -39,6 +39,13 @@ describe("createTelegramUIContext", () => {
       .rejects.toThrow("TelePi does not yet support extension UI method 'input'.");
   });
 
+  it("degrades unsupported custom UI to dialog fallbacks", async () => {
+    const ui = createTelegramUIContext({ notify: vi.fn() });
+
+    await expect(ui.custom(vi.fn()))
+      .resolves.toBeUndefined();
+  });
+
   it("exposes setWorkingIndicator as a no-op for compatibility", () => {
     const ui = createTelegramUIContext({ notify: vi.fn() });
 
