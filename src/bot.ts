@@ -623,6 +623,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   const handleUserPrompt = createPromptHandler({
     bot,
     toolVerbosity: config.toolVerbosity,
+    isActivityEnabled: (target) => chatState.isActivityEnabled(target),
     editDebounceMs: EDIT_DEBOUNCE_MS,
     typingIntervalMs: TYPING_INTERVAL_MS,
     isBusy,
@@ -682,6 +683,8 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     openCommandPicker,
     handleUserPrompt,
     getLastPrompt: (target) => chatState.getLastPrompt(target),
+    isActivityEnabled: (target) => chatState.isActivityEnabled(target),
+    setActivityEnabled: (target, enabled) => chatState.setActivityEnabled(target, enabled),
     extensionDialogs,
     getVoiceBackendStatus,
     safeReply,
@@ -692,6 +695,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     handleCommandsCommand,
     handleAbortCommand,
     handleSessionCommand,
+    handleActivityCommand,
     handleRetryCommand,
   } = basicCommandHandlers;
 
@@ -804,6 +808,9 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
         return;
       case "label":
         await handleLabelCommand(ctx, target, "/label");
+        return;
+      case "activity":
+        await handleActivityCommand(ctx, target);
         return;
       case "retry":
         await handleRetryCommand(ctx, target);
@@ -931,6 +938,15 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     }
 
     await handleLabelCommand(ctx, target);
+  });
+
+  bot.command("activity", async (ctx) => {
+    const target = getTelegramTarget(ctx);
+    if (!target) {
+      return;
+    }
+
+    await handleActivityCommand(ctx, target);
   });
 
   bot.command("retry", async (ctx) => {

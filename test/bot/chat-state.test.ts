@@ -1,6 +1,30 @@
 import { createBotChatState } from "../../src/bot/chat-state.js";
 
 describe("bot chat state", () => {
+  it("defaults activity on and isolates overrides by chat and topic", () => {
+    const state = createBotChatState();
+    const root = { chatId: 10 };
+    const topicA = { chatId: 10, messageThreadId: 1 };
+    const topicB = { chatId: 10, messageThreadId: 2 };
+    const otherChat = { chatId: 20 };
+
+    expect(state.isActivityEnabled(root)).toBe(true);
+    expect(state.isActivityEnabled(topicA)).toBe(true);
+
+    state.setActivityEnabled(topicA, false);
+
+    expect(state.isActivityEnabled(topicA)).toBe(false);
+    expect(state.isActivityEnabled(root)).toBe(true);
+    expect(state.isActivityEnabled(topicB)).toBe(true);
+    expect(state.isActivityEnabled(otherChat)).toBe(true);
+
+    state.clearPromptMemory(topicA);
+    expect(state.isActivityEnabled(topicA)).toBe(false);
+
+    state.setActivityEnabled(topicA, true);
+    expect(state.isActivityEnabled(topicA)).toBe(true);
+  });
+
   it("tracks busy state and prompt memory per chat/topic", () => {
     const state = createBotChatState();
     const root = { chatId: 123 };

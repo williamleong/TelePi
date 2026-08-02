@@ -19,6 +19,8 @@ export function createBasicCommandHandlers(deps: {
     preloadedSlashCommands?: SlashCommandInfo[],
   ) => Promise<boolean>;
   getLastPrompt: (target: PiSessionContext) => string | undefined;
+  isActivityEnabled: (target: PiSessionContext) => boolean;
+  setActivityEnabled: (target: PiSessionContext, enabled: boolean) => void;
   extensionDialogs: { cancelPending: (target: PiSessionContext) => Promise<boolean> };
   getVoiceBackendStatus: () => Promise<{ backends: string[]; warning?: string }>;
   safeReply: (ctx: Context, text: string, options?: TextOptions, target?: PiSessionContext) => Promise<void>;
@@ -31,6 +33,8 @@ export function createBasicCommandHandlers(deps: {
     openCommandPicker,
     handleUserPrompt,
     getLastPrompt,
+    isActivityEnabled,
+    setActivityEnabled,
     extensionDialogs,
     getVoiceBackendStatus,
     safeReply,
@@ -128,6 +132,23 @@ export function createBasicCommandHandlers(deps: {
     }, target);
   };
 
+  const handleActivityCommand = async (ctx: Context, target: PiSessionContext): Promise<void> => {
+    const argument = typeof ctx.match === "string" ? ctx.match.trim().toLowerCase() : "";
+
+    if (argument === "on" || argument === "off") {
+      setActivityEnabled(target, argument === "on");
+    }
+
+    const enabled = isActivityEnabled(target);
+    const stateText = `Activity details: ${enabled ? "on" : "off"}`;
+    const usageText = "Usage: /activity on|off";
+    const invalid = argument !== "" && argument !== "on" && argument !== "off";
+    const showUsage = argument === "" || invalid;
+    const plainText = showUsage ? `${stateText}\n${usageText}` : stateText;
+
+    await safeReply(ctx, escapeHTML(plainText), { fallbackText: plainText }, target);
+  };
+
   const handleRetryCommand = async (ctx: Context, target: PiSessionContext): Promise<void> => {
     const lastPrompt = getLastPrompt(target);
     if (!lastPrompt) {
@@ -146,6 +167,7 @@ export function createBasicCommandHandlers(deps: {
     handleCommandsCommand,
     handleAbortCommand,
     handleSessionCommand,
+    handleActivityCommand,
     handleRetryCommand,
   };
 }

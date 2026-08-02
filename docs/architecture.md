@@ -10,6 +10,7 @@ Telegram
 Grammy bot (`src/bot.ts`)
   ├─ transport helpers (`src/bot/telegram-transport.ts`)
   ├─ rendering helpers (`src/bot/message-rendering.ts`)
+  ├─ activity transcript rendering (`src/bot/activity-rendering.ts`)
   ├─ prompt execution (`src/bot/prompt-handler.ts`)
   ├─ chat-local state (`src/bot/chat-state.ts`)
   ├─ extension dialogs (`src/bot/extension-dialogs.ts`)
@@ -39,6 +40,12 @@ Pure rendering helpers for:
 - help/session/tool messages
 - markdown chunking and streaming previews
 - string truncation and formatting helpers
+
+### `src/bot/activity-rendering.ts`
+Activity transcript helpers for:
+- preserving provider thinking text
+- rendering deterministic compact tool rows
+- splitting activity transcripts into Telegram-sized chunks
 
 ### `src/bot/telegram-transport.ts`
 Telegram-specific transport helpers for:
@@ -81,10 +88,11 @@ Owns the prompt execution lifecycle:
 - text streaming + debounced edits
 - tool status rendering
 - final response/error finalization
+- delivering the per-prompt activity transcript separately from the final assistant output
 
 ### `src/bot/commands/*`
 Grouped command handlers split by concern:
-- `basic.ts` — `/start`, `/help`, `/commands`, `/abort`, `/session`, `/retry`
+- `basic.ts` — `/start`, `/help`, `/commands`, `/abort`, `/session`, `/retry`, `/activity`
 - `sessions.ts` — `/sessions`, `/switch`, `/new`, `/handback`
 - `model.ts` — `/model` and model picker rendering
 - `tree.ts` — `/tree`, `/branch`, `/label`

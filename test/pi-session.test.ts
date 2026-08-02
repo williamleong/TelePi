@@ -760,6 +760,7 @@ describe("PiSessionService", () => {
     await service.bindExtensions(bindings);
     service.subscribe({
       onTextDelta,
+      onThinkingDelta: vi.fn(),
       onToolStart: vi.fn(),
       onToolUpdate: vi.fn(),
       onToolEnd: vi.fn(),
@@ -852,6 +853,7 @@ describe("PiSessionService", () => {
     await service.bindExtensions(bindings);
     service.subscribe({
       onTextDelta: vi.fn(),
+      onThinkingDelta: vi.fn(),
       onToolStart: vi.fn(),
       onToolUpdate: vi.fn(),
       onToolEnd: vi.fn(),
@@ -1161,6 +1163,7 @@ describe("PiSessionService", () => {
     await service.bindExtensions(bindings);
     service.subscribe({
       onTextDelta: vi.fn(),
+      onThinkingDelta: vi.fn(),
       onToolStart: vi.fn(),
       onToolUpdate: vi.fn(),
       onToolEnd: vi.fn(),
@@ -1999,6 +2002,7 @@ describe("PiSessionService", () => {
     const currentSession = mockState.createdSessions[0]?.session;
 
     const onTextDelta = vi.fn();
+    const onThinkingDelta = vi.fn();
     const onToolStart = vi.fn();
     const onToolUpdate = vi.fn();
     const onToolEnd = vi.fn();
@@ -2007,6 +2011,7 @@ describe("PiSessionService", () => {
 
     const unsubscribe = service.subscribe({
       onTextDelta,
+      onThinkingDelta,
       onToolStart,
       onToolUpdate,
       onToolEnd,
@@ -2016,7 +2021,30 @@ describe("PiSessionService", () => {
 
     const emit = mockState.getSubscriber(currentSession);
     emit?.({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Hello" } });
-    emit?.({ type: "tool_execution_start", toolName: "bash", toolCallId: "tool-1" });
+    emit?.({
+      type: "message_update",
+      message: {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "Inspect" }],
+        timestamp: 123,
+      },
+      assistantMessageEvent: {
+        type: "thinking_delta",
+        contentIndex: 0,
+        delta: "Inspect",
+        partial: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "Inspect" }],
+          timestamp: 123,
+        },
+      },
+    } as never);
+    emit?.({
+      type: "tool_execution_start",
+      toolName: "read",
+      toolCallId: "tool-1",
+      args: { path: "src/pi-session.ts" },
+    } as never);
     emit?.({ type: "tool_execution_update", toolCallId: "tool-1", partialResult: { ok: true } });
     emit?.({ type: "tool_execution_end", toolCallId: "tool-1", isError: false });
     emit?.({ type: "session_info_changed", name: "Auto title" });
@@ -2024,7 +2052,8 @@ describe("PiSessionService", () => {
     unsubscribe();
 
     expect(onTextDelta).toHaveBeenCalledWith("Hello");
-    expect(onToolStart).toHaveBeenCalledWith("bash", "tool-1");
+    expect(onThinkingDelta).toHaveBeenCalledWith({ blockKey: "123:0", delta: "Inspect" });
+    expect(onToolStart).toHaveBeenCalledWith("read", "tool-1", { path: "src/pi-session.ts" });
     expect(onToolUpdate).toHaveBeenCalledWith("tool-1", '{\n  "ok": true\n}');
     expect(onToolEnd).toHaveBeenCalledWith("tool-1", false);
     expect(onSessionInfoChanged).toHaveBeenCalledWith("Auto title");

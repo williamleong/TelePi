@@ -11,6 +11,8 @@ export interface BotChatState {
   endTranscribing(target: PiSessionContext): void;
   getLastPrompt(target: PiSessionContext): string | undefined;
   clearPromptMemory(target: PiSessionContext): void;
+  readonly isActivityEnabled: (target: PiSessionContext) => boolean;
+  readonly setActivityEnabled: (target: PiSessionContext, enabled: boolean) => void;
 }
 
 export function createBotChatState(): BotChatState {
@@ -18,6 +20,7 @@ export function createBotChatState(): BotChatState {
   const switchingContexts = new Set<string>();
   const transcribingContexts = new Set<string>();
   const lastPrompts = new Map<string, string>();
+  const activityDisabledContexts = new Set<string>();
 
   const getContextKey = (target: PiSessionContext): string => getPiSessionContextKey(target);
 
@@ -63,6 +66,19 @@ export function createBotChatState(): BotChatState {
 
     clearPromptMemory(target) {
       lastPrompts.delete(getContextKey(target));
+    },
+
+    isActivityEnabled(target) {
+      return !activityDisabledContexts.has(getContextKey(target));
+    },
+
+    setActivityEnabled(target, enabled) {
+      const contextKey = getContextKey(target);
+      if (enabled) {
+        activityDisabledContexts.delete(contextKey);
+        return;
+      }
+      activityDisabledContexts.add(contextKey);
     },
   };
 }
