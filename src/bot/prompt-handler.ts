@@ -266,7 +266,11 @@ async function runPromptFlow(
     if (changed) {
       const newestMessageId = latestOutputMessageId();
       if (newestMessageId !== undefined) {
-        await migrateAbortOwner(newestMessageId);
+        try {
+          await migrateAbortOwner(newestMessageId);
+        } catch (error) {
+          console.error("Failed to migrate Telegram Abort button", error);
+        }
       }
     }
     streamSegments.markDelivered(segment.id, revision);
@@ -595,11 +599,7 @@ async function runPromptFlow(
         console.error(`Failed to update tool message for ${state.toolName}`, error);
       });
     },
-    onAgentEnd: () => {
-      void finalizeSuccess().catch((error) => {
-        console.error("Failed to finalize Telegram response message", error);
-      });
-    },
+    onAgentEnd: () => {},
     onSessionInfoChanged: (sessionName) => {
       if (!renameForumTopicToSessionName) {
         return;

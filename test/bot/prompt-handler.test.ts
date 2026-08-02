@@ -210,6 +210,58 @@ describe("prompt handler", () => {
     await expect(result).resolves.toBe(true);
   });
 
+  it("keeps delivery, typing, and Abort ownership active after agent end until prompt settles", async () => {
+    vi.useFakeTimers();
+    const promptRelease = deferred();
+    const promptStarted = deferred<PiSessionCallbacks>();
+    const harness = createPromptHarness({
+      typingIntervalMs: 4_500,
+      onPrompt: async (callbacks) => {
+        promptStarted.resolve(callbacks);
+        await promptRelease.promise;
+      },
+    });
+
+    try {
+      const result = harness.run();
+      const callbacks = await promptStarted.promise;
+
+      callbacks.onAgentEnd();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(harness.operations).not.toContainEqual(
+        expect.objectContaining({ kind: "edit", messageId: 1, text: expect.stringMatching(/Done/i) }),
+      );
+      expect(harness.operations).not.toContainEqual(
+        expect.objectContaining({ kind: "markup", messageId: 1, hasAbort: false }),
+      );
+
+      callbacks.onThinkingDelta({ blockKey: "late-thinking", delta: "late thought" });
+      await vi.advanceTimersByTimeAsync(0);
+      await harness.waitForOperation(
+        (operation) => operation.kind === "send" && operation.messageId === 2 && operation.text.includes("late thought"),
+      );
+
+      callbacks.onTextDelta("late answer");
+      await vi.advanceTimersByTimeAsync(0);
+      await harness.waitForOperation(
+        (operation) => operation.kind === "send" && operation.messageId === 3 && operation.text.includes("late answer"),
+      );
+
+      const typingBeforeInterval = harness.operations.filter((operation) => operation.kind === "typing").length;
+      await vi.advanceTimersByTimeAsync(4_500);
+      expect(harness.operations.filter((operation) => operation.kind === "typing")).toHaveLength(typingBeforeInterval + 1);
+
+      promptRelease.resolve();
+      await expect(result).resolves.toBe(true);
+      expect(harness.operations).toContainEqual(
+        expect.objectContaining({ kind: "edit", messageId: 1, text: expect.stringMatching(/Done/i) }),
+      );
+    } finally {
+      promptRelease.resolve();
+      vi.useRealTimers();
+    }
+  });
+
   it("sends typing before session activation finishes", async () => {
     const activation = deferred<unknown>();
     const harness = createPromptHarness({
@@ -356,35 +408,44 @@ describe("prompt handler", () => {
     expect(harness.trackCallbackMessages).toEqual([1, 2, 3, 5]);
   });
 
-  it("keeps the old Abort owner when the new-owner attach rejects", async () => {
+  it("isolates failed assistant Abort attachment and delivers later assistant deltas", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    let harness!: ReturnType<typeof createPromptHarness>;
+    const attachAttempted = deferred();
     const promptRelease = deferred();
-    harness = createPromptHarness({
+    const harness = createPromptHarness({
       onMarkup: (messageId, hasAbort) => {
         if (messageId === 2 && hasAbort) {
+          attachAttempted.resolve();
           return Promise.reject(new Error("attach failed"));
         }
       },
       onPrompt: async (callbacks) => {
-        callbacks.onThinkingDelta({ blockKey: "1", delta: "activity" });
+        callbacks.onTextDelta("first answer");
+        await attachAttempted.promise;
+        callbacks.onTextDelta(" extended");
         await promptRelease.promise;
-        callbacks.onAgentEnd();
       },
     });
 
     const result = harness.run();
-    await harness.waitForOperation((operation) => operation.kind === "send" && operation.messageId === 2);
-    await Promise.resolve();
-    expect(harness.markupAttempts).toContainEqual({ messageId: 2, hasAbort: true });
+    await attachAttempted.promise;
+    expect(harness.trackCallbackMessages).toEqual([1]);
     expect(harness.operations).not.toContainEqual(
       expect.objectContaining({ kind: "markup", messageId: 1, hasAbort: false }),
     );
 
+    await harness.waitForOperation(
+      (operation) => operation.kind === "edit" && operation.messageId === 2 && operation.text.includes("extended"),
+    );
     promptRelease.resolve();
+
     try {
       await expect(result).resolves.toBe(true);
+      expect(harness.operations).toContainEqual(
+        expect.objectContaining({ kind: "edit", messageId: 1, text: expect.stringMatching(/Done/i) }),
+      );
     } finally {
+      promptRelease.resolve();
       consoleError.mockRestore();
     }
   });
