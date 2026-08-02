@@ -168,10 +168,9 @@ function largestFittingThinkingPrefix(
 
 function renderThinkingBlock(text: string, continued: boolean): ActivityBlock {
   const header = continued ? "🧠 Thinking (continued)" : "🧠 Thinking";
-  const normalizedText = text.trimEnd();
   return {
-    html: normalizedText ? `${header}\n${escapeHTML(normalizedText)}` : header,
-    fallback: normalizedText ? `${header}\n${normalizedText}` : header,
+    html: text ? `${header}\n${escapeHTML(text)}` : header,
+    fallback: text ? `${header}\n${text}` : header,
   };
 }
 

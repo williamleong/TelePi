@@ -93,10 +93,22 @@ describe("activity transcript", () => {
       chunk.text.startsWith("🧠 Thinking (continued)\n")
     )).toBe(true);
     const reconstructed = chunks
-      .map((chunk) => chunk.fallbackText)
-      .join("\n")
-      .replaceAll("🧠 Thinking\n", "")
-      .replaceAll("🧠 Thinking (continued)\n", "");
-    expect(reconstructed.replaceAll("\n", "")).toBe(source);
+      .map((chunk) => chunk.fallbackText.replace(/^🧠 Thinking(?: \(continued\))?\n?/, ""))
+      .join("");
+    expect(reconstructed).toBe(source);
+  });
+
+  it("preserves boundary spaces and newlines when thinking rolls over", () => {
+    const source = `${"alpha \n".repeat(2_000)}tail \n\n`;
+    const normalizedSource = source.trimEnd();
+    const transcript = createActivityTranscript();
+    transcript.appendThinking({ blockKey: "1:0", delta: source });
+    const chunks = renderActivityTranscript(transcript);
+
+    expect(chunks.length).toBeGreaterThan(2);
+    const reconstructed = chunks
+      .map((chunk) => chunk.fallbackText.replace(/^🧠 Thinking(?: \(continued\))?\n?/, ""))
+      .join("");
+    expect(reconstructed).toBe(normalizedSource);
   });
 });
