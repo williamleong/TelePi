@@ -168,11 +168,49 @@ describe("activity transcript", () => {
     transcript.startTool("tool-1", "bash", { command: "npm test" });
 
     expect(renderActivityTranscript(transcript)).toEqual([{
-      text: "🧠 Thinking\nInspecting state\n<b>• ⌨️ Bash</b>\n<code>npm test</code>",
-      fallbackText: "🧠 Thinking\nInspecting state\n• ⌨️ Bash\nnpm test",
+      text: "🧠 Thinking\nInspecting state\n\n<b>• ⌨️ Bash</b>\n<code>npm test</code>",
+      fallbackText: "🧠 Thinking\nInspecting state\n\n• ⌨️ Bash\nnpm test",
       parseMode: "HTML",
-      sourceText: "🧠 Thinking\nInspecting state\n• ⌨️ Bash\nnpm test",
+      sourceText: "🧠 Thinking\nInspecting state\n\n• ⌨️ Bash\nnpm test",
     }]);
+  });
+
+  it("separates adjacent tool blocks in HTML and fallback output", () => {
+    const transcript = createActivityTranscript();
+    transcript.startTool("tool-1", "bash", { command: "npm test" });
+    transcript.startTool("tool-2", "read", { path: "src/a.ts" });
+
+    expect(renderActivityTranscript(transcript)).toEqual([{
+      text: "<b>• ⌨️ Bash</b>\n<code>npm test</code>\n\n<b>• 🔍 Read</b>\n<code>src/a.ts</code>",
+      fallbackText: "• ⌨️ Bash\nnpm test\n\n• 🔍 Read\nsrc/a.ts",
+      parseMode: "HTML",
+      sourceText: "• ⌨️ Bash\nnpm test\n\n• 🔍 Read\nsrc/a.ts",
+    }]);
+  });
+
+  it("normalizes trailing Bash detail before separating the next tool", () => {
+    const transcript = createActivityTranscript();
+    transcript.startTool("tool-1", "bash", { command: "printf 'x'\n" });
+    transcript.startTool("tool-2", "read", { path: "src/a.ts" });
+
+    expect(renderActivityTranscript(transcript)).toEqual([{
+      text: "<b>• ⌨️ Bash</b>\n<code>printf 'x'</code>\n\n<b>• 🔍 Read</b>\n<code>src/a.ts</code>",
+      fallbackText: "• ⌨️ Bash\nprintf 'x'\n\n• 🔍 Read\nsrc/a.ts",
+      parseMode: "HTML",
+      sourceText: "• ⌨️ Bash\nprintf 'x'\n\n• 🔍 Read\nsrc/a.ts",
+    }]);
+  });
+
+  it("rolls over when the two-newline separator no longer fits", () => {
+    const transcript = createActivityTranscript();
+    transcript.appendThinking({ blockKey: "1:0", delta: "x".repeat(3949) });
+    transcript.startTool("tool-1", "bash", { command: "npm test" });
+
+    const chunks = renderActivityTranscript(transcript);
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks.every((chunk) => !chunk.text.startsWith("\n") && !chunk.text.endsWith("\n"))).toBe(true);
+    expect(chunks.every((chunk) => !chunk.fallbackText.startsWith("\n") && !chunk.fallbackText.endsWith("\n"))).toBe(true);
   });
 
   it("rolls over without bold continued thinking headings", () => {

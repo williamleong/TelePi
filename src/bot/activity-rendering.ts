@@ -105,7 +105,7 @@ export function renderActivityTranscript(transcript: ActivityTranscript): Render
   };
 
   const appendBlock = (block: ActivityBlock): boolean => {
-    const separator = current ? "\n" : "";
+    const separator = current ? "\n\n" : "";
     const next = {
       html: `${current?.html ?? ""}${separator}${block.html}`,
       fallback: `${current?.fallback ?? ""}${separator}${block.fallback}`,
@@ -205,6 +205,7 @@ function renderThinkingBlock(text: string, continued: boolean): ActivityBlock {
 
 function fitToolBlock(entry: Extract<ActivityEntry, { kind: "tool" }>): ActivityBlock {
   const summary = summarizeActivityTool(entry);
+  const detail = summary.detail?.trimEnd();
   const status = statusSymbol(entry.status);
   const header = `${status} ${summary.label}`;
   const render = (detail: string | undefined): ActivityBlock => ({
@@ -214,16 +215,16 @@ function fitToolBlock(entry: Extract<ActivityEntry, { kind: "tool" }>): Activity
     fallback: detail === undefined ? header : `${header}\n${detail}`,
   });
 
-  const fullBlock = render(summary.detail);
+  const fullBlock = render(detail);
   if (fits(fullBlock)) {
     return fullBlock;
   }
 
-  if (summary.detail === undefined) {
+  if (detail === undefined) {
     return render(undefined);
   }
 
-  const characters = Array.from(summary.detail);
+  const characters = Array.from(detail);
   let low = 0;
   let high = characters.length;
   while (low < high) {
