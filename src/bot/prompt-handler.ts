@@ -340,14 +340,14 @@ async function runPromptFlow(
     return worker;
   };
 
-  const enqueueSegmentDelivery = (readyAt: number): void => {
+  const enqueueSegmentDelivery = (readyAt: number, waitForDebounce = true): void => {
     if (segmentDeliveryOperation) {
       return;
     }
 
     const operation: DeliveryOperation = {
       readyAt,
-      waitingForDebounce: true,
+      waitingForDebounce: waitForDebounce,
       execute: async () => {
         try {
           do {
@@ -376,11 +376,13 @@ async function runPromptFlow(
     };
     segmentDeliveryOperation = operation;
     deliveryQueue.push(operation);
-    deliveryTimer = setTimeout(() => {
-      operation.waitingForDebounce = false;
-      deliveryTimer = undefined;
-      void runDeliveryWorker();
-    }, Math.max(0, readyAt - Date.now()));
+    if (waitForDebounce) {
+      deliveryTimer = setTimeout(() => {
+        operation.waitingForDebounce = false;
+        deliveryTimer = undefined;
+        void runDeliveryWorker();
+      }, Math.max(0, readyAt - Date.now()));
+    }
     void runDeliveryWorker();
   };
 
@@ -412,17 +414,18 @@ async function runPromptFlow(
     return deliveryWorkerPromise ?? Promise.resolve();
   };
 
-  const forceSegmentDelivery = (): void => {
+  const forceSegmentDelivery = (): Promise<void> => {
     clearDeliveryTimer();
     if (deliveryFailure || streamSegments.getDirtySegments().length === 0) {
-      return;
+      return deliveryWorkerPromise ?? Promise.resolve();
     }
     if (segmentDeliveryOperation) {
       segmentDeliveryOperation.readyAt = Date.now();
       segmentDeliveryOperation.waitingForDebounce = false;
-      return;
+    } else {
+      enqueueSegmentDelivery(Date.now(), false);
     }
-    enqueueSegmentDelivery(Date.now());
+    return runDeliveryWorker();
   };
 
   const drainDeliveryQueue = async (): Promise<void> => {
@@ -433,7 +436,7 @@ async function runPromptFlow(
   };
 
   const drainDelivery = async (): Promise<void> => {
-    forceSegmentDelivery();
+    await forceSegmentDelivery();
     await drainDeliveryQueue();
     if (deliveryFailure) {
       throw deliveryFailure;
@@ -441,7 +444,7 @@ async function runPromptFlow(
   };
 
   const drainDeliveryAfterFailure = async (): Promise<void> => {
-    forceSegmentDelivery();
+    await forceSegmentDelivery();
     await drainDeliveryQueue();
   };
 

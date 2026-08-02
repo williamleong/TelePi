@@ -25,6 +25,32 @@ function deferred<T = void>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
+async function settlesWithinMicrotasks<T>(promise: Promise<T>, turns = 100): Promise<{
+  settled: boolean;
+  value?: T;
+  error?: unknown;
+}> {
+  let settled = false;
+  let value: T | undefined;
+  let error: unknown;
+  void promise.then(
+    (result) => {
+      value = result;
+      settled = true;
+    },
+    (reason: unknown) => {
+      error = reason;
+      settled = true;
+    },
+  );
+
+  for (let turn = 0; turn < turns && !settled; turn += 1) {
+    await Promise.resolve();
+  }
+
+  return { settled, value, error };
+}
+
 function hasAbortKeyboard(replyMarkup: unknown): boolean {
   return String(JSON.stringify(replyMarkup)).includes("pi_abort");
 }
@@ -675,6 +701,38 @@ describe("prompt handler", () => {
       );
     } finally {
       consoleError.mockRestore();
+    }
+  });
+
+  it("finalizes a summary-only tool prompt without waiting for debounce timers", async () => {
+    vi.useFakeTimers();
+    const harness = createPromptHarness({
+      activityEnabled: false,
+      toolVerbosity: "summary",
+      editDebounceMs: 1_000,
+      onPrompt: (callbacks) => {
+        callbacks.onToolStart("read", "tool-1", { path: "src/a.ts" });
+      },
+    });
+
+    try {
+      expect(await settlesWithinMicrotasks(harness.run())).toEqual({ settled: true, value: true, error: undefined });
+      expect(harness.operations).toContainEqual(
+        expect.objectContaining({ kind: "send", messageId: 1, text: expect.stringMatching(/Working/i), hasAbort: true }),
+      );
+      expect(harness.operations).toContainEqual(
+        expect.objectContaining({ kind: "send", messageId: 2, text: expect.stringContaining("🔧 1 tool used: read") }),
+      );
+      expect(harness.operations).toContainEqual(
+        expect.objectContaining({ kind: "edit", messageId: 1, text: expect.stringMatching(/Done/i) }),
+      );
+      expect(harness.operations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: "markup", messageId: 1, hasAbort: false }),
+        expect.objectContaining({ kind: "markup", messageId: 2, hasAbort: false }),
+      ]));
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
     }
   });
 
