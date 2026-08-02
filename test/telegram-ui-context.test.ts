@@ -41,9 +41,11 @@ describe("createTelegramUIContext", () => {
 
   it("degrades unsupported custom UI to dialog fallbacks", async () => {
     const ui = createTelegramUIContext({ notify: vi.fn() });
+    const factory = vi.fn();
 
-    await expect(ui.custom(vi.fn()))
+    await expect(ui.custom(factory))
       .resolves.toBeUndefined();
+    expect(factory).not.toHaveBeenCalled();
   });
 
   it("exposes setWorkingIndicator as a no-op for compatibility", () => {
