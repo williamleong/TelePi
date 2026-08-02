@@ -44,7 +44,7 @@ Pure rendering helpers for:
 ### `src/bot/activity-rendering.ts`
 Activity transcript helpers for:
 - preserving provider thinking text
-- rendering compact tool activity rows
+- rendering deterministic compact tool rows
 - splitting activity transcripts into Telegram-sized chunks
 
 ### `src/bot/telegram-transport.ts`
