@@ -67,7 +67,20 @@ describe("activity transcript", () => {
     expect(chunk.parseMode).toBe("HTML");
   });
 
-  it("rolls over without dropping long thinking text", () => {
+  it("renders compact thinking and tool blocks with normalized separators", () => {
+    const transcript = createActivityTranscript();
+    transcript.appendThinking({ blockKey: "1:0", delta: "Inspecting state\n\n" });
+    transcript.startTool("tool-1", "bash", { command: "npm test" });
+
+    expect(renderActivityTranscript(transcript)).toEqual([{
+      text: "🧠 Thinking\nInspecting state\n<b>• ⌨️ Bash</b>\n<code>npm test</code>",
+      fallbackText: "🧠 Thinking\nInspecting state\n• ⌨️ Bash\nnpm test",
+      parseMode: "HTML",
+      sourceText: "🧠 Thinking\nInspecting state\n• ⌨️ Bash\nnpm test",
+    }]);
+  });
+
+  it("rolls over without bold continued thinking headings", () => {
     const source = `start-${"x".repeat(9000)}-end`;
     const transcript = createActivityTranscript();
     transcript.appendThinking({ blockKey: "1:0", delta: source });
@@ -76,6 +89,9 @@ describe("activity transcript", () => {
     expect(chunks.length).toBeGreaterThan(2);
     expect(chunks.every((chunk) => chunk.text.length <= 4000)).toBe(true);
     expect(chunks.every((chunk) => chunk.fallbackText.length <= 4000)).toBe(true);
+    expect(chunks.slice(1).every((chunk) =>
+      chunk.text.startsWith("🧠 Thinking (continued)\n")
+    )).toBe(true);
     const reconstructed = chunks
       .map((chunk) => chunk.fallbackText)
       .join("\n")
