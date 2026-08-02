@@ -130,6 +130,9 @@ async function runPromptFlow(
   const toolCounts = new Map<string, number>();
   let abortOwnerMessageId: number | undefined;
   const abortOwnerMessageIds = new Set<number>();
+  let workingMessageId: number | undefined;
+  let workingMessagePromise: Promise<void> | undefined;
+  let workingMessageAdopted = false;
   let deliveryTimer: NodeJS.Timeout | undefined;
   let deliveryWorkerPromise: Promise<void> | undefined;
   const deliveryQueue: DeliveryOperation[] = [];
@@ -203,6 +206,35 @@ async function runPromptFlow(
     }
   };
 
+  const ensureWorkingMessage = async (): Promise<void> => {
+    if (workingMessageId !== undefined) {
+      return;
+    }
+    if (workingMessagePromise) {
+      return workingMessagePromise;
+    }
+
+    workingMessagePromise = (async () => {
+      const message = await sendTextMessage(bot.api, target, "<i>⏳ Working…</i>", {
+        fallbackText: "⏳ Working…",
+        replyMarkup: abortKeyboard,
+      });
+      workingMessageId = message.message_id;
+      abortOwnerMessageId = message.message_id;
+      abortOwnerMessageIds.add(message.message_id);
+      trackCallbackMessage?.(target, message.message_id);
+      sendTyping();
+    })();
+
+    try {
+      await workingMessagePromise;
+    } catch (error) {
+      console.error("Failed to send Telegram working message", error);
+    } finally {
+      workingMessagePromise = undefined;
+    }
+  };
+
   const latestOutputMessageId = (): number | undefined => {
     for (const segment of [...streamSegments.getSegments()].reverse()) {
       for (const chunk of [...segment.chunks].reverse()) {
@@ -242,6 +274,24 @@ async function runPromptFlow(
       const previous = previousChunks[index];
       const current = streamSegments.getSegments().find((candidate) => candidate.id === segment.id)?.chunks[index];
       if (!current) {
+        continue;
+      }
+
+      if (
+        current.messageId === undefined
+        && workingMessageId !== undefined
+        && !workingMessageAdopted
+      ) {
+        await safeEditMessage(bot, target, workingMessageId, rendered.text, {
+          parseMode: rendered.parseMode,
+          fallbackText: rendered.fallbackText,
+          delivery: rendered.delivery,
+          replyMarkup: abortKeyboard,
+        });
+        streamSegments.setChunkMessageId(segment.id, index, workingMessageId);
+        workingMessageAdopted = true;
+        changed = true;
+        sendTyping();
         continue;
       }
 
@@ -461,6 +511,22 @@ async function runPromptFlow(
     lastAssistant.revision += 1;
   };
 
+  const deleteUnusedWorkingMessage = async (): Promise<void> => {
+    if (workingMessageId === undefined || workingMessageAdopted) {
+      return;
+    }
+
+    try {
+      await bot.api.deleteMessage(target.chatId, workingMessageId);
+      abortOwnerMessageIds.delete(workingMessageId);
+      if (abortOwnerMessageId === workingMessageId) {
+        abortOwnerMessageId = undefined;
+      }
+    } catch (error) {
+      console.error("Failed to delete Telegram working message", error);
+    }
+  };
+
   const finalizeSuccess = async (): Promise<void> => {
     if (finalizationPromise) {
       return finalizationPromise;
@@ -470,6 +536,7 @@ async function runPromptFlow(
       deliveryFinalizing = true;
       appendToolSummary();
       await drainDelivery();
+      await deleteUnusedWorkingMessage();
       await cleanupAbortOwners();
       deliveryFinalized = true;
       stopTyping();
@@ -487,7 +554,14 @@ async function runPromptFlow(
       await drainDeliveryAfterFailure();
       const status = renderPromptFailure("", error);
       try {
-        await safeReply(ctx, status, { fallbackText: status }, target);
+        if (workingMessageId !== undefined && !workingMessageAdopted) {
+          await safeEditMessage(bot, target, workingMessageId, status, {
+            fallbackText: status,
+            replyMarkup: abortKeyboard,
+          });
+        } else {
+          await safeReply(ctx, status, { fallbackText: status }, target);
+        }
       } catch (telegramError) {
         console.error("Failed to send Telegram prompt failure status", telegramError);
       }
@@ -517,6 +591,8 @@ async function runPromptFlow(
   } else {
     void refreshChatScopedCommands(target, piSession);
   }
+
+  await ensureWorkingMessage();
 
   let unsubscribe: (() => void) | undefined;
   try {
