@@ -54,6 +54,7 @@ import { startPromptInboxPolling } from "./bot/prompt-inbox.js";
 import { createCommandPickerHandlers, type PendingCommandPicker } from "./bot/command-picker.js";
 import { createBasicCommandHandlers } from "./bot/commands/basic.js";
 import { createSessionCommandHandlers } from "./bot/commands/sessions.js";
+import { deliverSessionExchangePreview } from "./bot/session-exchange-preview.js";
 import { createContextCommandHandlers } from "./bot/commands/context.js";
 import { createModelCommandHandlers } from "./bot/commands/model.js";
 import { createTreeCommandHandlers } from "./bot/commands/tree.js";
@@ -1125,6 +1126,12 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
         await safeReply(ctx, html, { fallbackText: plainText }, target);
       }
 
+      await deliverSessionExchangePreview(piSession, async (preview) => {
+        await safeReply(ctx, preview.text, {
+          fallbackText: preview.fallbackText,
+          parseMode: preview.parseMode,
+        }, target);
+      });
       await surfaceStartupErrorDiagnostics(ctx, target, info);
     } catch (error) {
       const failure = renderFailedText(error);
