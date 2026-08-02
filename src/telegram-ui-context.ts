@@ -95,8 +95,8 @@ export function createTelegramUIContext(options: CreateTelegramUIContextOptions)
     setFooter() {},
     setHeader() {},
     setTitle() {},
-    async custom() {
-      unsupported("custom");
+    async custom<T>() {
+      return undefined as T;
     },
     pasteToEditor() {},
     setEditorText() {},
