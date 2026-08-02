@@ -2230,6 +2230,49 @@ describe("PiSessionService", () => {
     expect(mockState.SessionManager.create).toHaveBeenCalledWith("/workspace/base");
   });
 
+  it("creates a session when reading a saved topic session throws", async () => {
+    const store = TopicSessionStore.memory();
+    vi.spyOn(store, "get").mockImplementation(() => {
+      throw new Error("read failed");
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const registry = await PiSessionRegistry.create(createConfig(), store);
+
+    const service = await registry.getOrCreate({ chatId: 1, messageThreadId: 99 });
+
+    expect(registry.get({ chatId: 1, messageThreadId: 99 })).toBe(service);
+    expect(mockState.SessionManager.create).toHaveBeenCalledWith("/workspace/base");
+  });
+
+  it("creates a session when deleting a missing saved topic session throws", async () => {
+    const store = TopicSessionStore.memory();
+    store.set("1::99", { sessionFile: "/missing/saved.jsonl", workspace: "/workspace/missing" });
+    vi.spyOn(store, "delete").mockImplementation(() => {
+      throw new Error("delete failed");
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const registry = await PiSessionRegistry.create(createConfig(), store);
+
+    const service = await registry.getOrCreate({ chatId: 1, messageThreadId: 99 });
+
+    expect(registry.get({ chatId: 1, messageThreadId: 99 })).toBe(service);
+    expect(mockState.SessionManager.create).toHaveBeenCalledWith("/workspace/base");
+  });
+
+  it("keeps a created session when saving its topic session throws", async () => {
+    const store = TopicSessionStore.memory();
+    vi.spyOn(store, "set").mockImplementation(() => {
+      throw new Error("write failed");
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const registry = await PiSessionRegistry.create(createConfig(), store);
+
+    const service = await registry.getOrCreate({ chatId: 1, messageThreadId: 99 });
+
+    expect(registry.get({ chatId: 1, messageThreadId: 99 })).toBe(service);
+    expect(mockState.SessionManager.create).toHaveBeenCalledWith("/workspace/base");
+  });
+
   it("leaves persisted topic sessions intact when the registry is disposed", async () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), "telepi-registry-"));
     const sessionFile = path.join(tempDir, "saved.jsonl");

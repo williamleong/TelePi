@@ -1337,7 +1337,11 @@ export class PiSessionRegistry {
         this.services.set(key, service);
         const { sessionFile, workspace } = service.getInfo();
         if (sessionFile) {
-          this.topicSessionStore.set(key, { sessionFile, workspace });
+          try {
+            this.topicSessionStore.set(key, { sessionFile, workspace });
+          } catch {
+            console.warn(`Could not save Pi session for Telegram context ${key}.`);
+          }
         }
         return service;
       })
@@ -1381,7 +1385,12 @@ export class PiSessionRegistry {
       };
     }
 
-    const saved = this.topicSessionStore.get(key);
+    let saved;
+    try {
+      saved = this.topicSessionStore.get(key);
+    } catch {
+      console.warn(`Could not read saved Pi session for Telegram context ${key}; starting a new session.`);
+    }
     if (!saved) {
       return {
         ...this.config,
@@ -1391,7 +1400,11 @@ export class PiSessionRegistry {
     }
     if (!existsSync(saved.sessionFile)) {
       console.warn(`Saved Pi session for Telegram context ${key} no longer exists; starting a new session.`);
-      this.topicSessionStore.delete(key);
+      try {
+        this.topicSessionStore.delete(key);
+      } catch {
+        console.warn(`Could not remove missing Pi session for Telegram context ${key}.`);
+      }
       return {
         ...this.config,
         telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
