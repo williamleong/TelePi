@@ -135,6 +135,7 @@ async function runPromptFlow(
   const dialogBackedToolCallIds = new Set<string>();
   let abortOwnerMessageId: number | undefined;
   const abortOwnerMessageIds = new Set<number>();
+  const abortOwnerCallbackMessageIds = new Set<number>();
   let workingMessageId: number | undefined;
   let workingMessagePromise: Promise<void> | undefined;
   let workingMessageRemovalPromise: Promise<void> | undefined;
@@ -201,13 +202,21 @@ async function runPromptFlow(
     }
   };
 
+  const registerAbortOwner = (messageId: number): void => {
+    abortOwnerMessageIds.add(messageId);
+    if (abortOwnerCallbackMessageIds.has(messageId)) {
+      return;
+    }
+    abortOwnerCallbackMessageIds.add(messageId);
+    trackCallbackMessage?.(target, messageId);
+  };
+
   const migrateAbortOwner = async (messageId: number): Promise<void> => {
     if (dialogControlCallId !== undefined || abortOwnerMessageId === messageId) {
       return;
     }
 
-    abortOwnerMessageIds.add(messageId);
-    trackCallbackMessage?.(target, messageId);
+    registerAbortOwner(messageId);
     await bot.api.editMessageReplyMarkup(target.chatId, messageId, {
       reply_markup: abortKeyboard,
     });
@@ -234,8 +243,7 @@ async function runPromptFlow(
       });
       workingMessageId = message.message_id;
       abortOwnerMessageId = message.message_id;
-      abortOwnerMessageIds.add(message.message_id);
-      trackCallbackMessage?.(target, message.message_id);
+      registerAbortOwner(message.message_id);
       sendTyping();
     })();
 
@@ -299,6 +307,8 @@ async function runPromptFlow(
       replyMarkup: abortKeyboard,
     });
     workingMessageAdopted = true;
+    abortOwnerMessageId = workingMessageId;
+    registerAbortOwner(workingMessageId);
     sendTyping();
     return workingMessageId;
   };
@@ -318,8 +328,7 @@ async function runPromptFlow(
 
     if (!hasAbortOwner) {
       abortOwnerMessageId = message.message_id;
-      abortOwnerMessageIds.add(message.message_id);
-      trackCallbackMessage?.(target, message.message_id);
+      registerAbortOwner(message.message_id);
     } else {
       try {
         await migrateAbortOwner(message.message_id);
@@ -392,8 +401,7 @@ async function runPromptFlow(
         });
         if (!dialogControlActive && abortOwnerMessageId === undefined) {
           abortOwnerMessageId = message.message_id;
-          abortOwnerMessageIds.add(message.message_id);
-          trackCallbackMessage?.(target, message.message_id);
+          registerAbortOwner(message.message_id);
         }
         streamSegments.setChunkMessageId(segment.id, index, message.message_id);
         changed = true;

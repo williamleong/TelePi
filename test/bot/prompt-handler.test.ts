@@ -976,6 +976,56 @@ describe("prompt handler", () => {
     }
   });
 
+  it("restores abort ownership when ask_user deletion fails and Working is adopted", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      activityEnabled: false,
+      toolVerbosity: "all",
+      onDelete: () => Promise.reject(new Error("delete rejected")),
+      onPrompt: async (callbacks) => {
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        await harness.ui()!.select("Choose one", ["Yes", "No"]);
+        callbacks.onToolEnd("question-1", false);
+
+        callbacks.onToolStart("bash", "tool-1", {});
+        await harness.waitForOperation(
+          (operation) => operation.kind === "edit"
+            && operation.messageId === 1
+            && operation.text.includes("Running:"),
+        );
+
+        callbacks.onToolStart("grep", "tool-2", {});
+        await harness.waitForOperation(
+          (operation) => operation.kind === "send"
+            && operation.messageId === 2
+            && operation.text.includes("Running:"),
+        );
+      },
+    });
+
+    try {
+      await expect(harness.run()).resolves.toBe(true);
+      expect(harness.operations).toContainEqual(expect.objectContaining({
+        kind: "edit",
+        messageId: 1,
+        text: expect.stringContaining("Running:"),
+        hasAbort: true,
+      }));
+      expect(harness.operations).toContainEqual(expect.objectContaining({
+        kind: "send",
+        messageId: 2,
+        text: expect.stringContaining("Running:"),
+        hasAbort: false,
+      }));
+      expect(harness.markupAttempts).toContainEqual({ messageId: 2, hasAbort: true });
+      expect(harness.markupAttempts).toContainEqual({ messageId: 1, hasAbort: false });
+      expect(harness.trackCallbackMessages).toEqual([1, 2]);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("neutralizes Abort on adopted Working content before opening ask_user", async () => {
     let harness!: ReturnType<typeof createPromptHarness>;
     harness = createPromptHarness({
