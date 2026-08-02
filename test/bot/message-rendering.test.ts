@@ -216,6 +216,22 @@ describe("bot message rendering helpers", () => {
     expect(chunks[1]?.fallbackText).toMatch(/^💬 Assistant \(continued\)\n/);
   });
 
+  it("preserves normal assistant source whitespace across a chunk boundary", () => {
+    const text = `${"a".repeat(3_960)}\n  ${"b".repeat(100)}`;
+    const chunks = renderAssistantSegment(text);
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks.map((chunk) => chunk.sourceText).join("")).toBe(text);
+  });
+
+  it("preserves rich Markdown assistant source whitespace across a chunk boundary", () => {
+    const text = `# Report\n${"a".repeat(32_700)}\n  ${"b".repeat(100)}`;
+    const chunks = renderAssistantSegment(text);
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks.map((chunk) => chunk.sourceText).join("")).toBe(text);
+  });
+
   it("preserves rich Markdown assistant delivery with a Markdown-safe heading", () => {
     const markdown = [
       "# Report",

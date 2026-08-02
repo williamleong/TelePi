@@ -109,6 +109,7 @@ export function createStreamSegments(): StreamSegments {
         return undefined;
       }
 
+      toolSegmentIds.delete(toolCallId);
       segment.activity.finishTool(toolCallId, isError);
       segment.revision += 1;
       return segment;

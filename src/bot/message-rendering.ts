@@ -517,7 +517,7 @@ function splitAssistantText(
     const rendered = fitAssistantChunk(candidate, continued, limit, renderChunk);
 
     chunks.push(rendered);
-    remaining = remaining.slice(rendered.sourceText.length).trimStart();
+    remaining = remaining.slice(rendered.sourceText.length);
   }
 
   return chunks;

@@ -78,6 +78,22 @@ describe("chronological stream segments", () => {
     expect(activity.activity?.entries[0]).toMatchObject({ status: "success" });
   });
 
+  it("ignores a duplicate tool completion after the first completion", () => {
+    const stream = createStreamSegments();
+    const activity = stream.startTool("read", "tool-1", { path: "src/a.ts" });
+    const completed = stream.finishTool("tool-1", false);
+    const revision = activity.revision;
+    const status = activity.activity?.entries[0];
+
+    const duplicate = stream.finishTool("tool-1", true);
+
+    expect(completed).toBe(activity);
+    expect(duplicate).toBeUndefined();
+    expect(activity.revision).toBe(revision);
+    expect(activity.activity?.entries[0]).toBe(status);
+    expect(activity.activity?.entries[0]).toMatchObject({ status: "success" });
+  });
+
   it("tracks rendered chunks, delivery, and delivery failures per segment", () => {
     const stream = createStreamSegments();
     const activity = stream.appendThinking({ blockKey: "1:0", delta: "Think" });
