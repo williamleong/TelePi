@@ -546,8 +546,12 @@ function splitAssistantText(
     const continued = chunks.length > 0;
     const headerLength = assistantHeader(continued).length + 4;
     const maxLength = Math.min(remaining.length, Math.max(1, limit - headerLength));
-    const initialCut = findPreferredSplitIndex(remaining, maxLength);
-    const candidate = remaining.slice(0, initialCut) || remaining.slice(0, 1);
+    let initialCut = findPreferredSplitIndex(remaining, maxLength);
+    if (isSurrogatePairBoundary(remaining, initialCut)) {
+      initialCut -= 1;
+    }
+    const candidate = remaining.slice(0, initialCut)
+      || remaining.slice(0, getCodePointEndIndexes(remaining)[0] ?? 1);
     const rendered = fitAssistantChunk(candidate, continued, limit, renderChunk);
 
     chunks.push(rendered);
@@ -557,19 +561,37 @@ function splitAssistantText(
   return chunks;
 }
 
+function isSurrogatePairBoundary(text: string, index: number): boolean {
+  const previous = text.charCodeAt(index - 1);
+  const next = text.charCodeAt(index);
+  return previous >= 0xd800 && previous <= 0xdbff
+    && next >= 0xdc00 && next <= 0xdfff;
+}
+
+function getCodePointEndIndexes(text: string): number[] {
+  const indexes: number[] = [];
+  for (let index = 0; index < text.length;) {
+    const codePoint = text.codePointAt(index);
+    index += codePoint !== undefined && codePoint > 0xffff ? 2 : 1;
+    indexes.push(index);
+  }
+  return indexes;
+}
+
 function fitAssistantChunk(
   candidate: string,
   continued: boolean,
   limit: number,
   renderChunk: (sourceText: string, continued: boolean) => RenderedChunk,
 ): RenderedChunk {
-  let low = 1;
-  let high = candidate.length;
-  let best = renderChunk(candidate.slice(0, 1), continued);
+  const endIndexes = getCodePointEndIndexes(candidate);
+  let low = 0;
+  let high = endIndexes.length - 1;
+  let best = renderChunk(candidate.slice(0, endIndexes[0]), continued);
 
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    const rendered = renderChunk(candidate.slice(0, middle), continued);
+    const rendered = renderChunk(candidate.slice(0, endIndexes[middle]), continued);
     if (rendered.text.length <= limit && rendered.fallbackText.length <= limit) {
       best = rendered;
       low = middle + 1;

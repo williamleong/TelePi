@@ -1608,6 +1608,31 @@ describe("prompt handler", () => {
     }
   });
 
+  it("emits a tool summary after a sealed assistant segment", async () => {
+    const harness = createPromptHarness({
+      activityEnabled: false,
+      toolVerbosity: "summary",
+      onPrompt: (callbacks) => {
+        callbacks.onTextDelta("I'll inspect first.");
+        callbacks.onToolStart("read", "tool-1", { path: "src/index.ts" });
+        callbacks.onToolEnd("tool-1", false);
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+
+    const assistantOperations = harness.operations.filter(
+      (operation): operation is Extract<TelegramOperation, { kind: "send" | "edit" }> =>
+        (operation.kind === "send" || operation.kind === "edit")
+        && operation.text.includes("Assistant"),
+    );
+    expect(assistantOperations.map((operation) => operation.text)).toEqual([
+      expect.stringContaining("I'll inspect first."),
+      expect.stringContaining("🔧 1 tool used: read"),
+    ]);
+    expect(assistantOperations[1]?.messageId).not.toBe(assistantOperations[0]?.messageId);
+  });
+
   it("preserves summary tool verbosity after adopting the working message", async () => {
     const harness = createPromptHarness({
       activityEnabled: false,
