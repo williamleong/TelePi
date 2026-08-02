@@ -62,6 +62,34 @@ describe("chronological stream segments", () => {
     expect(stream.getSegments().map((segment) => segment.kind)).toEqual(["assistant", "activity"]);
   });
 
+  it("updates an Agent in its owning activity segment", () => {
+    const stream = createStreamSegments();
+    const activity = stream.startTool("Agent", "agent-1", {
+      description: "Find relevant code",
+    });
+    stream.appendAssistantText("Waiting");
+    const revision = activity.revision;
+
+    expect(stream.updateTool("agent-1", {
+      details: { activity: "reading…" },
+    })).toBe(activity);
+    expect(activity.revision).toBe(revision + 1);
+    expect(activity.activity?.entries[0]).toMatchObject({ detail: "reading…" });
+    expect(stream.getSegments().map((segment) => segment.kind)).toEqual([
+      "activity",
+      "assistant",
+    ]);
+  });
+
+  it("does not dirty a segment for unusable Agent updates", () => {
+    const stream = createStreamSegments();
+    const activity = stream.startTool("Agent", "agent-1", {});
+    const revision = activity.revision;
+
+    expect(stream.updateTool("agent-1", { details: { activity: " " } })).toBeUndefined();
+    expect(activity.revision).toBe(revision);
+  });
+
   it("updates the original activity segment when a tool finishes after assistant text", () => {
     const stream = createStreamSegments();
     const activity = stream.startTool("read", "tool-1", { path: "src/a.ts" });

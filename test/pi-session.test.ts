@@ -2046,7 +2046,8 @@ describe("PiSessionService", () => {
       toolCallId: "tool-1",
       args: { path: "src/pi-session.ts" },
     } as never);
-    emit?.({ type: "tool_execution_update", toolCallId: "tool-1", partialResult: { ok: true } });
+    const partialResult = { details: { activity: "running command…" } };
+    emit?.({ type: "tool_execution_update", toolCallId: "tool-1", partialResult });
     emit?.({ type: "tool_execution_end", toolCallId: "tool-1", isError: false });
     emit?.({ type: "session_info_changed", name: "Auto title" });
     emit?.({ type: "agent_end" });
@@ -2055,7 +2056,7 @@ describe("PiSessionService", () => {
     expect(onTextDelta).toHaveBeenCalledWith("Hello");
     expect(onThinkingDelta).toHaveBeenCalledWith({ blockKey: "123:0", delta: "Inspect" });
     expect(onToolStart).toHaveBeenCalledWith("read", "tool-1", { path: "src/pi-session.ts" });
-    expect(onToolUpdate).toHaveBeenCalledWith("tool-1", '{\n  "ok": true\n}');
+    expect(onToolUpdate).toHaveBeenCalledWith("tool-1", partialResult);
     expect(onToolEnd).toHaveBeenCalledWith("tool-1", false);
     expect(onSessionInfoChanged).toHaveBeenCalledWith("Auto title");
     expect(onAgentEnd).toHaveBeenCalledTimes(1);

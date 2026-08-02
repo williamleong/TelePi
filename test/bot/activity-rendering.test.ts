@@ -33,6 +33,101 @@ describe("activity transcript", () => {
     expect(transcript.entries[0]).toMatchObject({ status: "error" });
   });
 
+  it("updates only Agent activity from structured partial results", () => {
+    const transcript = createActivityTranscript();
+    transcript.startTool("agent-1", "Agent", { description: "Find relevant code" });
+
+    expect(transcript.updateTool("agent-1", {
+      details: { activity: "running command…" },
+    })).toBe(true);
+    expect(transcript.updateTool("agent-1", {
+      details: { activity: "running command…" },
+    })).toBe(false);
+    expect(transcript.updateTool("missing", {
+      details: { activity: "reading…" },
+    })).toBe(false);
+
+    expect(renderActivityTranscript(transcript)[0]?.fallbackText).toContain(
+      "• Agent — Find relevant code\nrunning command…",
+    );
+
+    transcript.finishTool("agent-1", false);
+    expect(renderActivityTranscript(transcript)[0]?.fallbackText).toContain(
+      "✓ Agent — Find relevant code\nDone",
+    );
+  });
+
+  it("shows Error when an Agent fails", () => {
+    const transcript = createActivityTranscript();
+    transcript.startTool("agent-1", "Agent", { description: "Find relevant code" });
+    transcript.updateTool("agent-1", { details: { activity: "reading…" } });
+
+    transcript.finishTool("agent-1", true);
+
+    expect(renderActivityTranscript(transcript)[0]?.fallbackText).toContain(
+      "✗ Agent — Find relevant code\nError",
+    );
+  });
+
+  it.each([null, [], {}, { details: null }, { details: { activity: " " } }])(
+    "ignores malformed Agent update %j",
+    (partialResult) => {
+      const transcript = createActivityTranscript();
+      transcript.startTool("agent-1", "Agent", {});
+      expect(transcript.updateTool("agent-1", partialResult)).toBe(false);
+    },
+  );
+
+  it("ignores structured updates for other tools", () => {
+    const transcript = createActivityTranscript();
+    transcript.startTool("bash-1", "bash", { command: "npm test" });
+
+    expect(transcript.updateTool("bash-1", {
+      details: { activity: "must not appear" },
+    })).toBe(false);
+    expect(renderActivityTranscript(transcript)[0]?.fallbackText).not.toContain("must not appear");
+  });
+
+  it("ignores Agent updates whose activity accessor throws", () => {
+    const transcript = createActivityTranscript();
+    transcript.startTool("agent-1", "Agent", {});
+    const partialResult = Object.defineProperty({}, "details", {
+      get() {
+        throw new Error("unsafe accessor");
+      },
+    });
+
+    expect(transcript.updateTool("agent-1", partialResult)).toBe(false);
+  });
+
+  it("keeps the Agent chunk stable when completion shortens live activity", () => {
+    const transcript = createActivityTranscript();
+    transcript.appendThinking({ blockKey: "1:0", delta: "x".repeat(3_900) });
+    transcript.startTool("agent-1", "Agent", { description: "Find relevant code" });
+    transcript.updateTool("agent-1", {
+      details: { activity: "running command ".repeat(30) },
+    });
+    const runningChunks = renderActivityTranscript(transcript);
+
+    transcript.finishTool("agent-1", false);
+    const completedChunks = renderActivityTranscript(transcript);
+
+    expect(runningChunks).toHaveLength(2);
+    expect(completedChunks).toHaveLength(runningChunks.length);
+    expect(completedChunks[1]?.fallbackText).toContain("Done");
+  });
+
+  it("bounds oversized Agent descriptions instead of dropping the row", () => {
+    const transcript = createActivityTranscript();
+    transcript.startTool("agent-1", "Agent", { description: "x".repeat(5_000) });
+
+    const chunks = renderActivityTranscript(transcript);
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.fallbackText).toMatch(/^• Agent — x+…$/);
+    expect(chunks[0]?.fallbackText.length).toBeLessThanOrEqual(4000);
+  });
+
   it.each([
     ["read", { path: "src/a.ts" }, "🔍 Read\nsrc/a.ts"],
     ["bash", { command: "npm test" }, "⌨️ Bash\nnpm test"],

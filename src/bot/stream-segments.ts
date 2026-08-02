@@ -29,6 +29,7 @@ export interface StreamSegments {
   appendAssistantText(delta: string): StreamSegment;
   appendThinking(event: PiThinkingDelta): StreamSegment;
   startTool(toolName: string, toolCallId: string, args: unknown): StreamSegment;
+  updateTool(toolCallId: string, partialResult: unknown): StreamSegment | undefined;
   finishTool(toolCallId: string, isError: boolean): StreamSegment | undefined;
   getSegments(): readonly StreamSegment[];
   getDirtySegments(): readonly StreamSegment[];
@@ -89,6 +90,20 @@ export function createStreamSegments(): StreamSegments {
       const segment = activeSegment("activity");
       segment.activity?.startTool(toolCallId, toolName, args);
       toolSegmentIds.set(toolCallId, segment.id);
+      segment.revision += 1;
+      return segment;
+    },
+    updateTool(toolCallId, partialResult) {
+      const segmentId = toolSegmentIds.get(toolCallId);
+      if (segmentId === undefined) {
+        return undefined;
+      }
+
+      const segment = findSegment(segmentId);
+      if (!segment?.activity?.updateTool(toolCallId, partialResult)) {
+        return undefined;
+      }
+
       segment.revision += 1;
       return segment;
     },

@@ -61,7 +61,7 @@ export interface PiSessionCallbacks {
   onTextDelta: (delta: string) => void;
   onThinkingDelta: (event: PiThinkingDelta) => void;
   onToolStart: (toolName: string, toolCallId: string, args: unknown) => void;
-  onToolUpdate: (toolCallId: string, partialResult: string) => void;
+  onToolUpdate: (toolCallId: string, partialResult: unknown) => void;
   onToolEnd: (toolCallId: string, isError: boolean) => void;
   onAgentEnd: () => void;
   onSessionInfoChanged?: (sessionName: string | undefined) => void;
@@ -584,7 +584,7 @@ export function subscribeToSession(
         callbacks.onToolStart(event.toolName, event.toolCallId, event.args);
         break;
       case "tool_execution_update":
-        callbacks.onToolUpdate(event.toolCallId, stringifyToolData(event.partialResult));
+        callbacks.onToolUpdate(event.toolCallId, event.partialResult);
         break;
       case "tool_execution_end":
         callbacks.onToolEnd(event.toolCallId, event.isError);
@@ -1530,18 +1530,6 @@ function resolveModelOverride(
   }
 
   return matches[0];
-}
-
-function stringifyToolData(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
 }
 
 function wrapError(message: string, error: unknown): Error {
