@@ -73,6 +73,13 @@ type ToolState = {
   finalStatus?: RenderedText;
 };
 
+type DeliveryOperation = {
+  readyAt: number;
+  waitingForDebounce?: boolean;
+  execute: () => Promise<void>;
+  onError?: (error: unknown) => void;
+};
+
 function renderedChunksMatch(left: RenderedChunk | undefined, right: RenderedChunk): boolean {
   return left?.text === right.text
     && left.fallbackText === right.fallbackText
@@ -112,15 +119,14 @@ async function runPromptFlow(
   const abortOwnerMessageIds = new Set<number>();
   let deliveryTimer: NodeJS.Timeout | undefined;
   let deliveryWorkerPromise: Promise<void> | undefined;
-  let deliveryPending = false;
+  const deliveryQueue: DeliveryOperation[] = [];
+  let segmentDeliveryOperation: DeliveryOperation | undefined;
   let deliveryFinalizing = false;
   let deliveryFinalized = false;
   let deliveryFailure: unknown;
   let lastDeliveryAt = 0;
   let finalizationPromise: Promise<void> | undefined;
   let failureFinalizationPromise: Promise<void> | undefined;
-  let legacyDeliveryChain = Promise.resolve();
-  let legacyDeliveryFinalizing = false;
   let typingStopped = false;
 
   const sendTyping = (): void => {
@@ -182,22 +188,6 @@ async function runPromptFlow(
       await clearAbortKeyboard(previousOwnerMessageId);
     }
     abortOwnerMessageId = messageId;
-  };
-
-  const enqueueLegacyDelivery = (delivery: () => Promise<void>, errorMessage: string): void => {
-    if (legacyDeliveryFinalizing || deliveryFinalizing || deliveryFinalized) {
-      return;
-    }
-
-    legacyDeliveryChain = legacyDeliveryChain
-      .then(delivery)
-      .catch((error) => {
-        console.error(errorMessage, error);
-      });
-  };
-
-  const drainLegacyDelivery = async (): Promise<void> => {
-    await legacyDeliveryChain;
   };
 
   const ensureWorkingMessage = async (): Promise<void> => {
@@ -306,27 +296,35 @@ async function runPromptFlow(
 
   const runDeliveryWorker = (): Promise<void> => {
     if (deliveryWorkerPromise) {
-      deliveryPending = true;
       return deliveryWorkerPromise;
     }
 
     const worker = (async () => {
-      do {
-        deliveryPending = false;
-        for (const segment of streamSegments.getDirtySegments()) {
-          try {
-            await deliverSegment(segment);
-          } catch (error) {
-            if (segment.kind === "activity") {
-              console.error("Failed to update Telegram activity transcript", error);
-              streamSegments.markDeliveryFailed(segment.id);
-              continue;
-            }
-            deliveryFailure = error;
-            throw error;
+      while (deliveryQueue.length > 0) {
+        const operation = deliveryQueue[0];
+        const delay = operation.readyAt - Date.now();
+        if (operation.waitingForDebounce || delay > 0) {
+          if (!deliveryTimer) {
+            deliveryTimer = setTimeout(() => {
+              operation.waitingForDebounce = false;
+              deliveryTimer = undefined;
+              void runDeliveryWorker();
+            }, Math.max(0, delay));
+          }
+          return;
+        }
+
+        deliveryQueue.shift();
+        try {
+          await operation.execute();
+        } catch (error) {
+          if (operation.onError) {
+            operation.onError(error);
+          } else {
+            console.error("Failed to deliver Telegram prompt output", error);
           }
         }
-      } while (deliveryPending || streamSegments.getDirtySegments().length > 0);
+      }
     })();
 
     deliveryWorkerPromise = worker;
@@ -334,58 +332,117 @@ async function runPromptFlow(
       if (deliveryWorkerPromise === worker) {
         deliveryWorkerPromise = undefined;
       }
+    }).then(() => {
+      if (deliveryQueue.length > 0 && !deliveryTimer) {
+        void runDeliveryWorker();
+      }
     }).catch(() => {});
     return worker;
+  };
+
+  const enqueueSegmentDelivery = (readyAt: number): void => {
+    if (segmentDeliveryOperation) {
+      return;
+    }
+
+    const operation: DeliveryOperation = {
+      readyAt,
+      waitingForDebounce: true,
+      execute: async () => {
+        try {
+          do {
+            for (const segment of streamSegments.getDirtySegments()) {
+              try {
+                await deliverSegment(segment);
+              } catch (error) {
+                if (segment.kind === "activity") {
+                  console.error("Failed to update Telegram activity transcript", error);
+                  streamSegments.markDeliveryFailed(segment.id);
+                  continue;
+                }
+                throw error;
+              }
+            }
+          } while (streamSegments.getDirtySegments().length > 0);
+        } finally {
+          segmentDeliveryOperation = undefined;
+        }
+      },
+      onError: (error) => {
+        if (deliveryFailure === undefined) {
+          deliveryFailure = error;
+        }
+      },
+    };
+    segmentDeliveryOperation = operation;
+    deliveryQueue.push(operation);
+    deliveryTimer = setTimeout(() => {
+      operation.waitingForDebounce = false;
+      deliveryTimer = undefined;
+      void runDeliveryWorker();
+    }, Math.max(0, readyAt - Date.now()));
+    void runDeliveryWorker();
+  };
+
+  const enqueueLegacyDelivery = (delivery: () => Promise<void>, errorMessage: string): void => {
+    if (deliveryFinalizing || deliveryFinalized) {
+      return;
+    }
+
+    deliveryQueue.push({
+      readyAt: Date.now(),
+      execute: async () => {
+        try {
+          await delivery();
+        } catch (error) {
+          console.error(errorMessage, error);
+        }
+      },
+    });
+    void runDeliveryWorker();
   };
 
   const requestDelivery = (): Promise<void> => {
     if (deliveryFinalizing || deliveryFinalized) {
       return deliveryWorkerPromise ?? Promise.resolve();
     }
-    deliveryPending = true;
-    if (deliveryWorkerPromise) {
-      return deliveryWorkerPromise;
-    }
-    if (deliveryTimer) {
-      return Promise.resolve();
-    }
 
-    const delay = Math.max(0, editDebounceMs - (Date.now() - lastDeliveryAt));
-    deliveryTimer = setTimeout(() => {
-      deliveryTimer = undefined;
-      if (deliveryFinalizing || deliveryFinalized) {
-        return;
-      }
-      void runDeliveryWorker().catch(() => {});
-    }, delay);
-    return Promise.resolve();
+    const readyAt = Date.now() + Math.max(0, editDebounceMs - (Date.now() - lastDeliveryAt));
+    enqueueSegmentDelivery(readyAt);
+    return deliveryWorkerPromise ?? Promise.resolve();
+  };
+
+  const forceSegmentDelivery = (): void => {
+    clearDeliveryTimer();
+    if (deliveryFailure || streamSegments.getDirtySegments().length === 0) {
+      return;
+    }
+    if (segmentDeliveryOperation) {
+      segmentDeliveryOperation.readyAt = Date.now();
+      segmentDeliveryOperation.waitingForDebounce = false;
+      return;
+    }
+    enqueueSegmentDelivery(Date.now());
+  };
+
+  const drainDeliveryQueue = async (): Promise<void> => {
+    while (deliveryWorkerPromise || deliveryQueue.length > 0) {
+      const worker = deliveryWorkerPromise ?? runDeliveryWorker();
+      await worker;
+    }
   };
 
   const drainDelivery = async (): Promise<void> => {
-    clearDeliveryTimer();
-    while (true) {
-      if (deliveryFailure) {
-        throw deliveryFailure;
-      }
-      const worker = deliveryWorkerPromise ?? runDeliveryWorker();
-      await worker;
-      if (deliveryFailure) {
-        throw deliveryFailure;
-      }
-      if (streamSegments.getDirtySegments().length === 0 && !deliveryPending) {
-        return;
-      }
+    forceSegmentDelivery();
+    await drainDeliveryQueue();
+    if (deliveryFailure) {
+      throw deliveryFailure;
     }
   };
 
   const drainDeliveryAfterFailure = async (): Promise<void> => {
-    clearDeliveryTimer();
-    if (deliveryWorkerPromise) {
-      await deliveryWorkerPromise.catch(() => {});
-    }
-    if (!deliveryFailure && streamSegments.getDirtySegments().length > 0) {
-      await runDeliveryWorker().catch(() => {});
-    }
+    forceSegmentDelivery();
+    await drainDeliveryQueue();
   };
 
   const appendToolSummary = (): void => {
@@ -426,11 +483,8 @@ async function runPromptFlow(
 
     finalizationPromise = (async () => {
       deliveryFinalizing = true;
-      legacyDeliveryFinalizing = true;
-      clearDeliveryTimer();
       appendToolSummary();
       await drainDelivery();
-      await drainLegacyDelivery();
       await updateStatus("<b>✅ Done</b>", "✅ Done");
       await cleanupAbortOwners();
       deliveryFinalized = true;
@@ -446,9 +500,7 @@ async function runPromptFlow(
 
     failureFinalizationPromise = (async () => {
       deliveryFinalizing = true;
-      legacyDeliveryFinalizing = true;
       await drainDeliveryAfterFailure();
-      await drainLegacyDelivery();
       const status = renderPromptFailure("", error);
       try {
         await updateStatus(status, status);

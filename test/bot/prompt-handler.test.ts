@@ -828,6 +828,121 @@ describe("prompt handler", () => {
     expect(clearToolAbort).toBeGreaterThan(statusDone);
   });
 
+  it.each(["all", "errors-only"] as const)(
+    "serializes an earlier activity-off %s tool delivery before later assistant text and keeps one Abort owner",
+    async (toolVerbosity) => {
+      const toolDeliveryRelease = deferred();
+      const toolDeliveryStarted = deferred();
+      const assistantEmitted = deferred();
+      const promptRelease = deferred();
+      const toolDeliveryText = toolVerbosity === "all" ? "Running:" : "❌";
+      let harness!: ReturnType<typeof createPromptHarness>;
+      harness = createPromptHarness({
+        activityEnabled: false,
+        toolVerbosity,
+        onSend: async (text, messageId) => {
+          if (messageId === 2 && text.includes(toolDeliveryText)) {
+            toolDeliveryStarted.resolve();
+            await toolDeliveryRelease.promise;
+          }
+        },
+        onPrompt: async (callbacks) => {
+          callbacks.onToolStart("bash", "tool-1", {});
+          callbacks.onToolUpdate("tool-1", "stderr");
+          if (toolVerbosity === "errors-only") {
+            callbacks.onToolEnd("tool-1", true);
+          }
+          await toolDeliveryStarted.promise;
+
+          callbacks.onTextDelta("later assistant text");
+          if (toolVerbosity === "all") {
+            callbacks.onToolEnd("tool-1", true);
+          }
+          assistantEmitted.resolve();
+          await promptRelease.promise;
+        },
+      });
+
+      vi.useFakeTimers();
+      try {
+        const result = harness.run();
+        await toolDeliveryStarted.promise;
+        await assistantEmitted.promise;
+        await vi.advanceTimersByTimeAsync(0);
+        expect(harness.operations).not.toContainEqual(
+          expect.objectContaining({ kind: "send", messageId: 3, text: expect.stringContaining("later assistant text") }),
+        );
+
+        toolDeliveryRelease.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        await harness.waitForOperation(
+          (operation) => operation.kind === "send" && operation.messageId === 3 && operation.text.includes("later assistant text"),
+        );
+        await harness.waitForOperation(
+          (operation) => operation.kind === "markup" && operation.messageId === 3 && operation.hasAbort,
+        );
+        await harness.waitForOperation(
+          (operation) => operation.kind === "markup" && operation.messageId === 2 && !operation.hasAbort,
+        );
+        if (toolVerbosity === "all") {
+          await harness.waitForOperation(
+            (operation) => operation.kind === "edit" && operation.messageId === 2 && operation.text.includes("❌"),
+          );
+        }
+
+        const outputOperations = harness.operations.filter(
+          (operation): operation is Extract<TelegramOperation, { kind: "send" | "edit" }> =>
+            (operation.kind === "send" || operation.kind === "edit") && operation.messageId > 1,
+        );
+        expect(outputOperations.map((operation) => [operation.kind, operation.messageId])).toEqual(
+          toolVerbosity === "all"
+            ? [["send", 2], ["send", 3], ["edit", 2]]
+            : [["send", 2], ["send", 3]],
+        );
+        expect(outputOperations[0].text).toContain(toolDeliveryText);
+        expect(outputOperations[1].text).toContain("later assistant text");
+        if (toolVerbosity === "all") {
+          expect(outputOperations[2].text).toContain("❌");
+        }
+
+        const statusDone = harness.operations.findIndex(
+          (operation) => operation.kind === "edit" && operation.messageId === 1 && /Done/i.test(operation.text),
+        );
+        expect(statusDone).toBe(-1);
+        const abortOwners = new Set<number>();
+        const ownersAfterMigrations: number[][] = [];
+        for (const operation of harness.operations) {
+          if (operation.kind === "send" && operation.hasAbort) {
+            abortOwners.add(operation.messageId);
+          }
+          if (operation.kind === "markup") {
+            if (operation.hasAbort) {
+              abortOwners.add(operation.messageId);
+            } else {
+              abortOwners.delete(operation.messageId);
+              ownersAfterMigrations.push([...abortOwners]);
+            }
+          }
+        }
+        expect(ownersAfterMigrations).toEqual([[2], [3]]);
+        expect(harness.trackCallbackMessages).toEqual([1, 2, 3]);
+
+        promptRelease.resolve();
+        await expect(result).resolves.toBe(true);
+        for (const operation of harness.operations) {
+          if (operation.kind === "markup" && !operation.hasAbort) {
+            abortOwners.delete(operation.messageId);
+          }
+        }
+        expect(abortOwners).toEqual(new Set());
+      } finally {
+        toolDeliveryRelease.resolve();
+        promptRelease.resolve();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("waits for deferred errors-only delivery and ignores late tool callbacks after settlement", async () => {
     const toolErrorRelease = deferred();
     const toolErrorStarted = deferred();
