@@ -340,7 +340,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     try {
       session.setSessionName(name);
     } catch (error) {
-      console.error("Failed to rename Pi session from Telegram forum topic:", formatError(error));
+      console.error("Failed to rename Pi session from Telegram forum topic:", formatError(error), getContextKey(target));
     }
   };
 

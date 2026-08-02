@@ -1225,6 +1225,7 @@ describe("createBot", () => {
       expect(consoleError).toHaveBeenCalledWith(
         "Failed to rename Pi session from Telegram forum topic:",
         "rename failed",
+        "456::777",
       );
       expect(api.sendMessage).not.toHaveBeenCalled();
       consoleError.mockRestore();
