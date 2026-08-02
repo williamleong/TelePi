@@ -5,26 +5,21 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import { formatError } from "../errors.js";
 import {
   appendWithCap,
-  buildStreamingPreview,
   formatToolSummaryLine,
+  getAssistantSegmentDelivery,
   isMessageNotModifiedError,
-  isRichMarkdownCandidate,
+  renderAssistantSegment,
   renderExtensionError,
   renderExtensionNotice,
   renderPromptFailure,
   renderToolEndMessage,
   renderToolStartMessage,
-  renderMarkdownChunkWithinLimit,
-  splitMarkdownForTelegram,
-  splitRichMarkdownForTelegram,
   TOOL_OUTPUT_PREVIEW_LIMIT,
   type RenderedChunk,
   type RenderedText,
 } from "./message-rendering.js";
-import {
-  createActivityTranscript,
-  renderActivityTranscript,
-} from "./activity-rendering.js";
+import { renderActivityTranscript } from "./activity-rendering.js";
+import { createStreamSegments, type StreamSegment } from "./stream-segments.js";
 import {
   safeEditMessage,
   safeReply,
@@ -78,6 +73,20 @@ type ToolState = {
   finalStatus?: RenderedText;
 };
 
+type DeliveryOperation = {
+  readyAt: number;
+  waitingForDebounce?: boolean;
+  execute: () => Promise<void>;
+  onError?: (error: unknown) => void;
+};
+
+function renderedChunksMatch(left: RenderedChunk | undefined, right: RenderedChunk): boolean {
+  return left?.text === right.text
+    && left.fallbackText === right.fallbackText
+    && left.parseMode === right.parseMode
+    && left.delivery === right.delivery;
+}
+
 async function runPromptFlow(
   deps: PromptFlowDeps,
   ctx: Context,
@@ -100,39 +109,35 @@ async function runPromptFlow(
   } = deps;
 
   const activityEnabled = deps.isActivityEnabled(target);
-  const activityTranscript = activityEnabled ? createActivityTranscript() : undefined;
   const abortKeyboard = new InlineKeyboard().text("⏹ Abort", "pi_abort");
+  const streamSegments = createStreamSegments();
   const toolStates = new Map<string, ToolState>();
   const toolCounts = new Map<string, number>();
-  let accumulatedText = "";
-  let responseMessageId: number | undefined;
-  let responseMessagePromise: Promise<void> | undefined;
-  let lastRenderedText = "";
-  let lastEditAt = 0;
-  let flushTimer: NodeJS.Timeout | undefined;
-  let isFlushing = false;
-  let flushPending = false;
-  let finalized = false;
+  let statusMessageId: number | undefined;
+  let workingMessagePromise: Promise<void> | undefined;
+  let abortOwnerMessageId: number | undefined;
+  const abortOwnerMessageIds = new Set<number>();
+  let deliveryTimer: NodeJS.Timeout | undefined;
+  let deliveryWorkerPromise: Promise<void> | undefined;
+  const deliveryQueue: DeliveryOperation[] = [];
+  let segmentDeliveryOperation: DeliveryOperation | undefined;
+  let deliveryFinalizing = false;
+  let deliveryFinalized = false;
+  let deliveryFailure: unknown;
+  let lastDeliveryAt = 0;
   let finalizationPromise: Promise<void> | undefined;
-  let activityMessageIds: number[] = [];
-  let lastActivityChunks: RenderedChunk[] = [];
-  let activityFlushTimer: NodeJS.Timeout | undefined;
-  let activityDeliveryFailed = false;
-  let activityFlushInProgress = false;
-  let activityFlushPending = false;
-  let activityFlushPromise: Promise<void> | undefined;
-  let activityFinalizationPromise: Promise<void> | undefined;
-  let activityFinalized = false;
-  let activityFinalizing = false;
-  let activityVersion = 0;
-  let deliveredActivityVersion = 0;
-  let lastActivityFlushAt = 0;
+  let failureFinalizationPromise: Promise<void> | undefined;
   let typingStopped = false;
 
-  const typingInterval = setInterval(() => {
+  const sendTyping = (): void => {
+    if (typingStopped) {
+      return;
+    }
     void sendChatAction(bot.api, target, "typing").catch(() => {});
-  }, typingIntervalMs);
-  void sendChatAction(bot.api, target, "typing").catch(() => {});
+  };
+
+  const typingInterval = setInterval(sendTyping, typingIntervalMs);
+  sendTyping();
 
   const stopTyping = (): void => {
     if (typingStopped) {
@@ -142,274 +147,16 @@ async function runPromptFlow(
     clearInterval(typingInterval);
   };
 
-  const clearFlushTimer = (): void => {
-    if (flushTimer) {
-      clearTimeout(flushTimer);
-      flushTimer = undefined;
+  const clearDeliveryTimer = (): void => {
+    if (deliveryTimer) {
+      clearTimeout(deliveryTimer);
+      deliveryTimer = undefined;
     }
   };
 
-  const clearActivityFlushTimer = (): void => {
-    if (activityFlushTimer) {
-      clearTimeout(activityFlushTimer);
-      activityFlushTimer = undefined;
-    }
-  };
-
-  const renderPreview = (): RenderedChunk => {
-    const previewText = buildStreamingPreview(accumulatedText);
-    return renderMarkdownChunkWithinLimit(previewText);
-  };
-
-  const buildFinalResponseText = (text: string): string => {
-    if (activityEnabled || toolVerbosity !== "summary") {
-      return text.trim();
-    }
-
-    const summaryLine = formatToolSummaryLine(toolCounts);
-    const trimmedText = text.trim();
-    if (!summaryLine) {
-      return trimmedText;
-    }
-
-    return trimmedText ? `${trimmedText}\n\n${summaryLine}` : summaryLine;
-  };
-
-  const ensureWorkingMessage = async (): Promise<void> => {
-    if (responseMessageId) {
-      return;
-    }
-    if (responseMessagePromise) {
-      try {
-        await responseMessagePromise;
-      } catch {
-        // A later text delta or final response can try sending again.
-      }
-      return;
-    }
-
-    const workingText = "<i>⏳ Working…</i>";
-    const fallbackText = "⏳ Working…";
-    responseMessagePromise = (async () => {
-      const message = await sendTextMessage(bot.api, target, workingText, {
-        fallbackText,
-        replyMarkup: abortKeyboard,
-      });
-      trackCallbackMessage?.(target, message.message_id);
-      responseMessageId = message.message_id;
-      lastRenderedText = workingText;
-      lastEditAt = Date.now();
-      stopTyping();
-    })();
-
+  const clearAbortKeyboard = async (messageId: number): Promise<void> => {
     try {
-      await responseMessagePromise;
-    } catch (error) {
-      console.error("Failed to send Telegram working message", error);
-    } finally {
-      responseMessagePromise = undefined;
-    }
-  };
-
-  const ensureResponseMessage = async (): Promise<void> => {
-    if (responseMessageId) {
-      return;
-    }
-    if (responseMessagePromise) {
-      await responseMessagePromise;
-      return;
-    }
-
-    responseMessagePromise = (async () => {
-      stopTyping();
-      const preview = renderPreview();
-      const message = await sendTextMessage(bot.api, target, preview.text, {
-        parseMode: preview.parseMode,
-        fallbackText: preview.fallbackText,
-        replyMarkup: abortKeyboard,
-      });
-      trackCallbackMessage?.(target, message.message_id);
-      responseMessageId = message.message_id;
-      lastRenderedText = preview.text;
-      lastEditAt = Date.now();
-    })();
-
-    try {
-      await responseMessagePromise;
-    } finally {
-      responseMessagePromise = undefined;
-    }
-  };
-
-  const flushResponse = async (force = false): Promise<void> => {
-    if (!accumulatedText) {
-      return;
-    }
-    if (!responseMessageId) {
-      await ensureResponseMessage();
-      return;
-    }
-    if (isFlushing) {
-      flushPending = true;
-      return;
-    }
-
-    const now = Date.now();
-    if (!force && now - lastEditAt < editDebounceMs) {
-      return;
-    }
-
-    const nextText = renderPreview();
-    if (nextText.text === lastRenderedText) {
-      return;
-    }
-
-    isFlushing = true;
-    try {
-      await safeEditMessage(bot, target, responseMessageId, nextText.text, {
-        parseMode: nextText.parseMode,
-        fallbackText: nextText.fallbackText,
-        replyMarkup: abortKeyboard,
-      });
-      lastRenderedText = nextText.text;
-      lastEditAt = Date.now();
-    } finally {
-      isFlushing = false;
-      if (flushPending) {
-        flushPending = false;
-        scheduleFlush();
-      }
-    }
-  };
-
-  const scheduleFlush = (): void => {
-    if (flushTimer || finalized) {
-      return;
-    }
-
-    const delay = Math.max(0, editDebounceMs - (Date.now() - lastEditAt));
-    flushTimer = setTimeout(() => {
-      flushTimer = undefined;
-      void flushResponse().catch((error) => {
-        console.error("Failed to update Telegram response message", error);
-      });
-    }, delay);
-  };
-
-  const scheduleActivityFlush = (): void => {
-    if (!activityTranscript || activityDeliveryFailed || activityFinalizing || activityFinalized) {
-      return;
-    }
-    if (activityFlushInProgress) {
-      activityFlushPending = true;
-      return;
-    }
-    if (activityFlushTimer) {
-      return;
-    }
-
-    const delay = Math.max(0, editDebounceMs - (Date.now() - lastActivityFlushAt));
-    activityFlushTimer = setTimeout(() => {
-      activityFlushTimer = undefined;
-      if (activityFinalizing || activityFinalized) {
-        return;
-      }
-      void flushActivity().catch(() => {});
-    }, delay);
-  };
-
-  const flushActivity = (force = false): Promise<void> => {
-    if (!activityTranscript || activityDeliveryFailed || activityTranscript.entries.length === 0) {
-      return Promise.resolve();
-    }
-    if (activityFlushInProgress) {
-      activityFlushPending = true;
-      return activityFlushPromise!;
-    }
-
-    const now = Date.now();
-    if (!force && now - lastActivityFlushAt < editDebounceMs) {
-      scheduleActivityFlush();
-      return Promise.resolve();
-    }
-
-    activityFlushInProgress = true;
-    const flushVersion = activityVersion;
-    activityFlushPromise = Promise.resolve().then(async () => {
-      try {
-        const chunks = renderActivityTranscript(activityTranscript);
-        for (const [index, chunk] of chunks.entries()) {
-          const messageId = activityMessageIds[index];
-          const previousChunk = lastActivityChunks[index];
-          if (messageId === undefined) {
-            const message = await sendTextMessage(bot.api, target, chunk.text, {
-              parseMode: chunk.parseMode,
-              fallbackText: chunk.fallbackText,
-              delivery: chunk.delivery,
-            });
-            activityMessageIds[index] = message.message_id;
-            continue;
-          }
-          if (previousChunk?.text === chunk.text && previousChunk?.fallbackText === chunk.fallbackText) {
-            continue;
-          }
-          await safeEditMessage(bot, target, messageId, chunk.text, {
-            parseMode: chunk.parseMode,
-            fallbackText: chunk.fallbackText,
-            delivery: chunk.delivery,
-          });
-        }
-        lastActivityChunks = chunks;
-        lastActivityFlushAt = Date.now();
-        deliveredActivityVersion = flushVersion;
-      } catch (error) {
-        console.error("Failed to update Telegram activity transcript", error);
-        activityDeliveryFailed = true;
-        clearActivityFlushTimer();
-      } finally {
-        activityFlushInProgress = false;
-        activityFlushPromise = undefined;
-        if (activityFlushPending) {
-          activityFlushPending = false;
-          if (!activityDeliveryFailed && !activityFinalizing && !activityFinalized) {
-            scheduleActivityFlush();
-          }
-        }
-      }
-    });
-    return activityFlushPromise;
-  };
-
-  const finalizeActivity = async (): Promise<void> => {
-    if (activityFinalizationPromise) {
-      await activityFinalizationPromise;
-      return;
-    }
-
-    activityFinalizationPromise = (async () => {
-      activityFinalizing = true;
-      clearActivityFlushTimer();
-      while (!activityDeliveryFailed && activityTranscript?.entries.length) {
-        await flushActivity(true);
-        clearActivityFlushTimer();
-        if (deliveredActivityVersion >= activityVersion && !activityFlushInProgress && !activityFlushPending) {
-          break;
-        }
-      }
-      clearActivityFlushTimer();
-      activityFinalized = true;
-    })();
-
-    await activityFinalizationPromise;
-  };
-
-  const removeAbortKeyboard = async (): Promise<void> => {
-    if (!responseMessageId) {
-      return;
-    }
-
-    try {
-      await bot.api.editMessageReplyMarkup(target.chatId, responseMessageId, {
+      await bot.api.editMessageReplyMarkup(target.chatId, messageId, {
         reply_markup: new InlineKeyboard(),
       });
     } catch (error) {
@@ -419,77 +166,355 @@ async function runPromptFlow(
     }
   };
 
-  const deliverRenderedChunks = async (chunks: RenderedChunk[]): Promise<void> => {
-    if (chunks.length === 0) {
-      return;
-    }
-
-    const [firstChunk, ...remainingChunks] = chunks;
-    if (responseMessageId) {
-      await safeEditMessage(bot, target, responseMessageId, firstChunk.text, {
-        parseMode: firstChunk.parseMode,
-        fallbackText: firstChunk.fallbackText,
-        delivery: firstChunk.delivery,
-      });
-      await removeAbortKeyboard();
-    } else {
-      const message = await sendTextMessage(bot.api, target, firstChunk.text, {
-        parseMode: firstChunk.parseMode,
-        fallbackText: firstChunk.fallbackText,
-        delivery: firstChunk.delivery,
-      });
-      responseMessageId = message.message_id;
-    }
-
-    for (const chunk of remainingChunks) {
-      await sendTextMessage(bot.api, target, chunk.text, {
-        parseMode: chunk.parseMode,
-        fallbackText: chunk.fallbackText,
-        delivery: chunk.delivery,
-      });
+  const cleanupAbortOwners = async (): Promise<void> => {
+    for (const messageId of abortOwnerMessageIds) {
+      await clearAbortKeyboard(messageId);
     }
   };
 
-  const finalizeResponse = async (): Promise<void> => {
-    if (finalizationPromise) {
-      await finalizationPromise;
+  const migrateAbortOwner = async (messageId: number): Promise<void> => {
+    if (abortOwnerMessageId === messageId) {
       return;
     }
 
-    finalizationPromise = (async () => {
-      finalized = true;
-      stopTyping();
-      clearFlushTimer();
-      await finalizeActivity();
-      if (responseMessagePromise) {
-        try {
-          await responseMessagePromise;
-        } catch {
-          // If the initial send failed, we will fall back to sending the final response below.
-        }
-      }
+    await bot.api.editMessageReplyMarkup(target.chatId, messageId, {
+      reply_markup: abortKeyboard,
+    });
+    trackCallbackMessage?.(target, messageId);
+    abortOwnerMessageIds.add(messageId);
 
-      const finalText = buildFinalResponseText(accumulatedText);
-      if (!finalText) {
-        const html = "<b>✅ Done</b>";
-        const plainText = "✅ Done";
+    const previousOwnerMessageId = abortOwnerMessageId;
+    if (previousOwnerMessageId !== undefined) {
+      await clearAbortKeyboard(previousOwnerMessageId);
+    }
+    abortOwnerMessageId = messageId;
+  };
 
-        if (responseMessageId) {
-          await safeEditMessage(bot, target, responseMessageId, html, { fallbackText: plainText });
-          await removeAbortKeyboard();
-        } else {
-          await safeReply(ctx, html, { fallbackText: plainText }, target);
-        }
-        return;
-      }
+  const ensureWorkingMessage = async (): Promise<void> => {
+    if (statusMessageId !== undefined) {
+      return;
+    }
+    if (workingMessagePromise) {
+      return workingMessagePromise;
+    }
 
-      const chunks = isRichMarkdownCandidate(finalText)
-        ? splitRichMarkdownForTelegram(finalText)
-        : splitMarkdownForTelegram(finalText);
-      await deliverRenderedChunks(chunks);
+    workingMessagePromise = (async () => {
+      const message = await sendTextMessage(bot.api, target, "<i>⏳ Working…</i>", {
+        fallbackText: "⏳ Working…",
+        replyMarkup: abortKeyboard,
+      });
+      statusMessageId = message.message_id;
+      abortOwnerMessageId = message.message_id;
+      abortOwnerMessageIds.add(message.message_id);
+      trackCallbackMessage?.(target, message.message_id);
+      sendTyping();
     })();
 
-    await finalizationPromise;
+    try {
+      await workingMessagePromise;
+    } catch (error) {
+      console.error("Failed to send Telegram working message", error);
+    } finally {
+      workingMessagePromise = undefined;
+    }
+  };
+
+  const latestOutputMessageId = (): number | undefined => {
+    for (const segment of [...streamSegments.getSegments()].reverse()) {
+      for (const chunk of [...segment.chunks].reverse()) {
+        if (chunk.messageId !== undefined) {
+          return chunk.messageId;
+        }
+      }
+    }
+    return undefined;
+  };
+
+  const renderSegment = (segment: StreamSegment): RenderedChunk[] => {
+    if (segment.kind === "activity") {
+      return renderActivityTranscript(segment.activity!);
+    }
+
+    const delivery = streamSegments.lockAssistantDelivery(
+      segment.id,
+      getAssistantSegmentDelivery(segment.assistantText),
+    );
+    return renderAssistantSegment(segment.assistantText, delivery);
+  };
+
+  const deliverSegment = async (segment: StreamSegment): Promise<void> => {
+    const revision = segment.revision;
+    const previousChunks = segment.chunks;
+    const renderedChunks = renderSegment(segment);
+    streamSegments.setRenderedChunks(segment.id, renderedChunks);
+
+    let changed = false;
+    for (const [index, rendered] of renderedChunks.entries()) {
+      const previous = previousChunks[index];
+      const current = streamSegments.getSegments().find((candidate) => candidate.id === segment.id)?.chunks[index];
+      if (!current) {
+        continue;
+      }
+
+      if (current.messageId === undefined) {
+        const message = await sendTextMessage(bot.api, target, rendered.text, {
+          parseMode: rendered.parseMode,
+          fallbackText: rendered.fallbackText,
+          delivery: rendered.delivery,
+        });
+        streamSegments.setChunkMessageId(segment.id, index, message.message_id);
+        changed = true;
+        sendTyping();
+        continue;
+      }
+
+      if (renderedChunksMatch(previous?.rendered, rendered)) {
+        continue;
+      }
+
+      await safeEditMessage(bot, target, current.messageId, rendered.text, {
+        parseMode: rendered.parseMode,
+        fallbackText: rendered.fallbackText,
+        delivery: rendered.delivery,
+      });
+      changed = true;
+    }
+
+    if (changed) {
+      const newestMessageId = latestOutputMessageId();
+      if (newestMessageId !== undefined) {
+        try {
+          await migrateAbortOwner(newestMessageId);
+        } catch (error) {
+          console.error("Failed to migrate Telegram Abort button", error);
+        }
+      }
+    }
+    streamSegments.markDelivered(segment.id, revision);
+    lastDeliveryAt = Date.now();
+  };
+
+  const runDeliveryWorker = (): Promise<void> => {
+    if (deliveryWorkerPromise) {
+      return deliveryWorkerPromise;
+    }
+
+    const worker = (async () => {
+      while (deliveryQueue.length > 0) {
+        const operation = deliveryQueue[0];
+        const delay = operation.readyAt - Date.now();
+        if (operation.waitingForDebounce || delay > 0) {
+          if (!deliveryTimer) {
+            deliveryTimer = setTimeout(() => {
+              operation.waitingForDebounce = false;
+              deliveryTimer = undefined;
+              void runDeliveryWorker();
+            }, Math.max(0, delay));
+          }
+          return;
+        }
+
+        deliveryQueue.shift();
+        try {
+          await operation.execute();
+        } catch (error) {
+          if (operation.onError) {
+            operation.onError(error);
+          } else {
+            console.error("Failed to deliver Telegram prompt output", error);
+          }
+        }
+      }
+    })();
+
+    deliveryWorkerPromise = worker;
+    void worker.finally(() => {
+      if (deliveryWorkerPromise === worker) {
+        deliveryWorkerPromise = undefined;
+      }
+    }).then(() => {
+      if (deliveryQueue.length > 0 && !deliveryTimer) {
+        void runDeliveryWorker();
+      }
+    }).catch(() => {});
+    return worker;
+  };
+
+  const enqueueSegmentDelivery = (readyAt: number, waitForDebounce = true): void => {
+    if (segmentDeliveryOperation) {
+      return;
+    }
+
+    const operation: DeliveryOperation = {
+      readyAt,
+      waitingForDebounce: waitForDebounce,
+      execute: async () => {
+        try {
+          do {
+            for (const segment of streamSegments.getDirtySegments()) {
+              try {
+                await deliverSegment(segment);
+              } catch (error) {
+                if (segment.kind === "activity") {
+                  console.error("Failed to update Telegram activity transcript", error);
+                  streamSegments.markDeliveryFailed(segment.id);
+                  continue;
+                }
+                throw error;
+              }
+            }
+          } while (streamSegments.getDirtySegments().length > 0);
+        } finally {
+          segmentDeliveryOperation = undefined;
+        }
+      },
+      onError: (error) => {
+        if (deliveryFailure === undefined) {
+          deliveryFailure = error;
+        }
+      },
+    };
+    segmentDeliveryOperation = operation;
+    deliveryQueue.push(operation);
+    if (waitForDebounce) {
+      deliveryTimer = setTimeout(() => {
+        operation.waitingForDebounce = false;
+        deliveryTimer = undefined;
+        void runDeliveryWorker();
+      }, Math.max(0, readyAt - Date.now()));
+    }
+    void runDeliveryWorker();
+  };
+
+  const enqueueLegacyDelivery = (delivery: () => Promise<void>, errorMessage: string): void => {
+    if (deliveryFinalizing || deliveryFinalized) {
+      return;
+    }
+
+    deliveryQueue.push({
+      readyAt: Date.now(),
+      execute: async () => {
+        try {
+          await delivery();
+        } catch (error) {
+          console.error(errorMessage, error);
+        }
+      },
+    });
+    void runDeliveryWorker();
+  };
+
+  const requestDelivery = (): Promise<void> => {
+    if (deliveryFinalizing || deliveryFinalized) {
+      return deliveryWorkerPromise ?? Promise.resolve();
+    }
+
+    const readyAt = Date.now() + Math.max(0, editDebounceMs - (Date.now() - lastDeliveryAt));
+    enqueueSegmentDelivery(readyAt);
+    return deliveryWorkerPromise ?? Promise.resolve();
+  };
+
+  const forceSegmentDelivery = (): Promise<void> => {
+    clearDeliveryTimer();
+    if (deliveryFailure || streamSegments.getDirtySegments().length === 0) {
+      return deliveryWorkerPromise ?? Promise.resolve();
+    }
+    if (segmentDeliveryOperation) {
+      segmentDeliveryOperation.readyAt = Date.now();
+      segmentDeliveryOperation.waitingForDebounce = false;
+    } else {
+      enqueueSegmentDelivery(Date.now(), false);
+    }
+    return runDeliveryWorker();
+  };
+
+  const drainDeliveryQueue = async (): Promise<void> => {
+    while (deliveryWorkerPromise || deliveryQueue.length > 0) {
+      const worker = deliveryWorkerPromise ?? runDeliveryWorker();
+      await worker;
+    }
+  };
+
+  const drainDelivery = async (): Promise<void> => {
+    await forceSegmentDelivery();
+    await drainDeliveryQueue();
+    if (deliveryFailure) {
+      throw deliveryFailure;
+    }
+  };
+
+  const drainDeliveryAfterFailure = async (): Promise<void> => {
+    await forceSegmentDelivery();
+    await drainDeliveryQueue();
+  };
+
+  const appendToolSummary = (): void => {
+    if (activityEnabled || toolVerbosity !== "summary") {
+      return;
+    }
+    const summary = formatToolSummaryLine(toolCounts);
+    if (!summary) {
+      return;
+    }
+
+    const lastAssistant = [...streamSegments.getSegments()].reverse().find(
+      (segment) => segment.kind === "assistant",
+    );
+    if (!lastAssistant) {
+      streamSegments.appendAssistantText(summary);
+      return;
+    }
+
+    lastAssistant.assistantText = lastAssistant.assistantText.trim()
+      ? `${lastAssistant.assistantText}\n\n${summary}`
+      : summary;
+    lastAssistant.revision += 1;
+  };
+
+  const updateStatus = async (text: string, fallbackText: string): Promise<void> => {
+    if (statusMessageId === undefined) {
+      await safeReply(ctx, text, { fallbackText }, target);
+      return;
+    }
+    await safeEditMessage(bot, target, statusMessageId, text, { fallbackText });
+  };
+
+  const finalizeSuccess = async (): Promise<void> => {
+    if (finalizationPromise) {
+      return finalizationPromise;
+    }
+
+    finalizationPromise = (async () => {
+      deliveryFinalizing = true;
+      appendToolSummary();
+      await drainDelivery();
+      await updateStatus("<b>✅ Done</b>", "✅ Done");
+      await cleanupAbortOwners();
+      deliveryFinalized = true;
+      stopTyping();
+    })();
+    return finalizationPromise;
+  };
+
+  const finalizeFailure = async (error: unknown): Promise<void> => {
+    if (failureFinalizationPromise) {
+      return failureFinalizationPromise;
+    }
+
+    failureFinalizationPromise = (async () => {
+      deliveryFinalizing = true;
+      await drainDeliveryAfterFailure();
+      const status = renderPromptFailure("", error);
+      try {
+        await updateStatus(status, status);
+      } catch (telegramError) {
+        console.error("Failed to send Telegram prompt failure status", telegramError);
+      }
+      await cleanupAbortOwners();
+      deliveryFinalized = true;
+      stopTyping();
+    })();
+    return failureFinalizationPromise;
   };
 
   let piSession: PiSessionService | undefined;
@@ -504,9 +529,8 @@ async function runPromptFlow(
     return "failed";
   }
 
-  const slashCommands = preloadedSlashCommands;
-  if (slashCommands) {
-    void syncChatScopedCommands(target, slashCommands).catch((error) => {
+  if (preloadedSlashCommands) {
+    void syncChatScopedCommands(target, preloadedSlashCommands).catch((error) => {
       console.error("Failed to sync chat-scoped Telegram commands", error);
     });
   } else {
@@ -514,7 +538,10 @@ async function runPromptFlow(
   }
 
   await ensureWorkingMessage();
-  await piSession.bindExtensions({
+
+  let unsubscribe: (() => void) | undefined;
+  try {
+    await piSession.bindExtensions({
     commandContextActions: {
       waitForIdle: async () => {
         await piSession.getSession().agent.waitForIdle();
@@ -559,37 +586,24 @@ async function runPromptFlow(
         console.error("Failed to send extension error", sendError);
       });
     },
-  });
+    });
 
-  const unsubscribe = piSession.subscribe({
+    unsubscribe = piSession.subscribe({
     onTextDelta: (delta) => {
-      accumulatedText += delta;
-      if (!responseMessageId) {
-        void ensureResponseMessage()
-          .then(() => {
-            scheduleFlush();
-          })
-          .catch((error) => {
-            console.error("Failed to send initial Telegram response message", error);
-          });
-        return;
-      }
-
-      scheduleFlush();
+      streamSegments.appendAssistantText(delta);
+      void requestDelivery();
     },
     onThinkingDelta: (event) => {
-      if (!activityTranscript) {
+      if (!activityEnabled) {
         return;
       }
-      activityTranscript.appendThinking(event);
-      activityVersion += 1;
-      scheduleActivityFlush();
+      streamSegments.appendThinking(event);
+      void requestDelivery();
     },
     onToolStart: (toolName, toolCallId, args) => {
-      if (activityTranscript) {
-        activityTranscript.startTool(toolCallId, toolName, args);
-        activityVersion += 1;
-        scheduleActivityFlush();
+      if (activityEnabled) {
+        streamSegments.startTool(toolName, toolCallId, args);
+        void requestDelivery();
         return;
       }
 
@@ -597,7 +611,6 @@ async function runPromptFlow(
         toolCounts.set(toolName, (toolCounts.get(toolName) ?? 0) + 1);
         return;
       }
-
       if (toolVerbosity === "none") {
         return;
       }
@@ -606,10 +619,8 @@ async function runPromptFlow(
       if (toolVerbosity !== "all") {
         return;
       }
-
       const messageText = renderToolStartMessage(toolName);
-
-      void (async () => {
+      enqueueLegacyDelivery(async () => {
         const message = await sendTextMessage(bot.api, target, messageText.text, {
           parseMode: messageText.parseMode,
           fallbackText: messageText.fallbackText,
@@ -618,38 +629,31 @@ async function runPromptFlow(
         if (!state) {
           return;
         }
-
         state.messageId = message.message_id;
-        if (state.finalStatus) {
-          await safeEditMessage(bot, target, state.messageId, state.finalStatus.text, {
-            parseMode: state.finalStatus.parseMode,
-            fallbackText: state.finalStatus.fallbackText,
-          });
+        try {
+          await migrateAbortOwner(message.message_id);
+        } catch (error) {
+          console.error("Failed to migrate Telegram Abort button", error);
         }
-      })().catch((error) => {
-        console.error(`Failed to send tool start message for ${toolName}`, error);
-      });
+      }, `Failed to send tool start message for ${toolName}`);
     },
     onToolUpdate: (toolCallId, partialResult) => {
-      if (activityTranscript || toolVerbosity === "none" || toolVerbosity === "summary") {
+      if (activityEnabled || toolVerbosity === "none" || toolVerbosity === "summary") {
         return;
       }
-
       const state = toolStates.get(toolCallId);
       if (!state || !partialResult) {
         return;
       }
-
       state.partialResult = appendWithCap(state.partialResult, partialResult, TOOL_OUTPUT_PREVIEW_LIMIT);
     },
     onToolEnd: (toolCallId, isError) => {
-      if (activityTranscript) {
-        activityTranscript.finishTool(toolCallId, isError);
-        activityVersion += 1;
-        scheduleActivityFlush();
+      if (activityEnabled) {
+        if (streamSegments.finishTool(toolCallId, isError)) {
+          void requestDelivery();
+        }
         return;
       }
-
       if (toolVerbosity === "none" || toolVerbosity === "summary") {
         return;
       }
@@ -658,43 +662,40 @@ async function runPromptFlow(
       if (!state) {
         return;
       }
-
       state.finalStatus = renderToolEndMessage(state.toolName, state.partialResult, isError);
       if (toolVerbosity === "errors-only") {
         if (!isError) {
           return;
         }
-
-        void sendTextMessage(bot.api, target, state.finalStatus.text, {
-          parseMode: state.finalStatus.parseMode,
-          fallbackText: state.finalStatus.fallbackText,
-        }).catch((error) => {
-          console.error(`Failed to send tool error message for ${state.toolName}`, error);
+        enqueueLegacyDelivery(async () => {
+          const message = await sendTextMessage(bot.api, target, state.finalStatus!.text, {
+            parseMode: state.finalStatus!.parseMode,
+            fallbackText: state.finalStatus!.fallbackText,
+          });
+          try {
+            await migrateAbortOwner(message.message_id);
+          } catch (error) {
+            console.error("Failed to migrate Telegram Abort button", error);
+          }
+        }, `Failed to send tool error message for ${state.toolName}`);
+        return;
+      }
+      enqueueLegacyDelivery(async () => {
+        const currentState = toolStates.get(toolCallId);
+        if (currentState?.messageId === undefined || !currentState.finalStatus) {
+          return;
+        }
+        await safeEditMessage(bot, target, currentState.messageId, currentState.finalStatus.text, {
+          parseMode: currentState.finalStatus.parseMode,
+          fallbackText: currentState.finalStatus.fallbackText,
         });
-        return;
-      }
-
-      if (!state.messageId) {
-        return;
-      }
-
-      void safeEditMessage(bot, target, state.messageId, state.finalStatus.text, {
-        parseMode: state.finalStatus.parseMode,
-        fallbackText: state.finalStatus.fallbackText,
-      }).catch((error) => {
-        console.error(`Failed to update tool message for ${state.toolName}`, error);
-      });
+      }, `Failed to update tool message for ${state.toolName}`);
     },
-    onAgentEnd: () => {
-      void finalizeResponse().catch((error) => {
-        console.error("Failed to finalize Telegram response message", error);
-      });
-    },
+    onAgentEnd: () => {},
     onSessionInfoChanged: (sessionName) => {
       if (!renameForumTopicToSessionName) {
         return;
       }
-
       void renameForumTopicToSessionName(target, {
         ...piSession.getInfo(),
         sessionName,
@@ -702,45 +703,23 @@ async function runPromptFlow(
     },
   });
 
-  try {
     if (images && images.length > 0) {
       await piSession.prompt(userText, images);
     } else {
       await piSession.prompt(userText);
     }
-    await finalizeResponse();
+    await finalizeSuccess();
     return "completed";
   } catch (error) {
-    stopTyping();
-    clearFlushTimer();
-    await finalizeActivity();
-    if (responseMessagePromise) {
-      try {
-        await responseMessagePromise;
-      } catch {
-        // Ignore; we will send an error message below.
-      }
+    if (finalizationPromise) {
+      await finalizationPromise.catch(() => {});
     }
-
-    if (finalized) {
-      console.error("Pi prompt error after finalization:", formatError(error));
-    } else {
-      finalized = true;
-
-      const combinedText = buildFinalResponseText(renderPromptFailure(accumulatedText, error));
-      const chunks = splitMarkdownForTelegram(combinedText);
-      try {
-        await deliverRenderedChunks(chunks);
-      } catch (telegramError) {
-        console.error("Failed to send error message to Telegram:", telegramError);
-      }
-    }
+    await finalizeFailure(error);
     return "failed";
   } finally {
     stopTyping();
-    clearFlushTimer();
-    clearActivityFlushTimer();
-    unsubscribe();
+    clearDeliveryTimer();
+    unsubscribe?.();
   }
 }
 

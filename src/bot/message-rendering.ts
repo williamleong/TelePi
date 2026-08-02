@@ -8,6 +8,7 @@ import {
 
 export type TelegramParseMode = "HTML";
 export type TelegramDelivery = "rich-markdown";
+export type AssistantSegmentDelivery = "plain" | TelegramDelivery;
 
 export type RenderedText = {
   text: string;
@@ -480,6 +481,108 @@ export function splitMarkdownForTelegram(markdown: string): RenderedChunk[] {
   }
 
   return chunks;
+}
+
+export function getAssistantSegmentDelivery(text: string): AssistantSegmentDelivery {
+  return isRichMarkdownCandidate(text) ? "rich-markdown" : "plain";
+}
+
+export function renderAssistantSegment(
+  text: string,
+  delivery = getAssistantSegmentDelivery(text),
+): RenderedChunk[] {
+  if (!text) {
+    return [];
+  }
+
+  return delivery === "rich-markdown"
+    ? splitAssistantRichMarkdown(text)
+    : splitAssistantMarkdown(text);
+}
+
+function splitAssistantMarkdown(markdown: string): RenderedChunk[] {
+  return splitAssistantText(markdown, TELEGRAM_MESSAGE_LIMIT, renderAssistantMarkdownChunk);
+}
+
+function splitAssistantRichMarkdown(markdown: string): RenderedChunk[] {
+  return splitAssistantText(markdown, TELEGRAM_RICH_MESSAGE_LIMIT, renderAssistantRichMarkdownChunk);
+}
+
+function splitAssistantText(
+  text: string,
+  limit: number,
+  renderChunk: (sourceText: string, continued: boolean) => RenderedChunk,
+): RenderedChunk[] {
+  const chunks: RenderedChunk[] = [];
+  let remaining = text;
+
+  while (remaining) {
+    const continued = chunks.length > 0;
+    const headerLength = assistantHeader(continued).length + 4;
+    const maxLength = Math.min(remaining.length, Math.max(1, limit - headerLength));
+    const initialCut = findPreferredSplitIndex(remaining, maxLength);
+    const candidate = remaining.slice(0, initialCut) || remaining.slice(0, 1);
+    const rendered = fitAssistantChunk(candidate, continued, limit, renderChunk);
+
+    chunks.push(rendered);
+    remaining = remaining.slice(rendered.sourceText.length);
+  }
+
+  return chunks;
+}
+
+function fitAssistantChunk(
+  candidate: string,
+  continued: boolean,
+  limit: number,
+  renderChunk: (sourceText: string, continued: boolean) => RenderedChunk,
+): RenderedChunk {
+  let low = 1;
+  let high = candidate.length;
+  let best = renderChunk(candidate.slice(0, 1), continued);
+
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const rendered = renderChunk(candidate.slice(0, middle), continued);
+    if (rendered.text.length <= limit && rendered.fallbackText.length <= limit) {
+      best = rendered;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  return best;
+}
+
+function renderAssistantMarkdownChunk(sourceText: string, continued: boolean): RenderedChunk {
+  const heading = assistantHeader(continued);
+  const rendered = formatMarkdownMessage(sourceText);
+  const usesHtml = rendered.parseMode === "HTML";
+  const htmlHeading = `<b>${escapeHTML(heading)}</b>`;
+
+  return {
+    ...rendered,
+    text: `${usesHtml ? htmlHeading : heading}\n${rendered.text}`,
+    fallbackText: `${heading}\n${rendered.fallbackText}`,
+    sourceText,
+  };
+}
+
+function renderAssistantRichMarkdownChunk(sourceText: string, continued: boolean): RenderedChunk {
+  const heading = assistantHeader(continued);
+  const rendered = formatRichMarkdownMessage(sourceText);
+
+  return {
+    ...rendered,
+    text: `**${heading}**\n\n${rendered.text}`,
+    fallbackText: `${heading}\n${rendered.fallbackText}`,
+    sourceText,
+  };
+}
+
+function assistantHeader(continued: boolean): string {
+  return continued ? "💬 Assistant (continued)" : "💬 Assistant";
 }
 
 export function renderMarkdownChunkWithinLimit(markdown: string): RenderedChunk {

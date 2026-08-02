@@ -11,7 +11,8 @@ Grammy bot (`src/bot.ts`)
   ├─ transport helpers (`src/bot/telegram-transport.ts`)
   ├─ rendering helpers (`src/bot/message-rendering.ts`)
   ├─ activity transcript rendering (`src/bot/activity-rendering.ts`)
-  ├─ prompt execution (`src/bot/prompt-handler.ts`)
+  ├─ chronological segment state (`src/bot/stream-segments.ts`)
+  ├─ prompt execution and serialized delivery (`src/bot/prompt-handler.ts`)
   ├─ chat-local state (`src/bot/chat-state.ts`)
   ├─ extension dialogs (`src/bot/extension-dialogs.ts`)
   └─ grouped command handlers (`src/bot/commands/*`)
@@ -80,15 +81,20 @@ Telegram-backed extension UI dialog lifecycle for:
 - input dialogs
 - timeout/cancel/finalization behavior
 
+### `src/bot/stream-segments.ts`
+Telegram-free state for the chronological prompt transcript. It groups adjacent thinking/tool events into activity segments and adjacent assistant deltas into assistant segments, seals segments when the output kind changes, tracks tool ownership and Telegram chunk metadata, and exposes dirty revisions for delivery.
+
 ### `src/bot/prompt-handler.ts`
-Owns the prompt execution lifecycle:
-- busy checks
-- session bootstrap
-- extension binding
-- text streaming + debounced edits
-- tool status rendering
-- final response/error finalization
-- delivering the per-prompt activity transcript separately from the final assistant output
+Owns the prompt execution lifecycle and one serialized chronological delivery pipeline:
+- busy checks, session bootstrap, and extension binding
+- status-only `Working…` message creation
+- Pi callback routing into activity and assistant segments
+- debounced, ordered Telegram sends/edits for dirty segment revisions
+- attach-before-detach migration of the single Abort keyboard to the newest output message
+- native `typing` refreshes throughout the prompt, stopping only when the run settles
+- final delivery drain, status update, Abort cleanup, and response/error finalization
+
+The status message never receives assistant output. Activity and assistant segments are appended in event order; adjacent events of one kind continue the open segment, while a kind switch starts a new message. Finalization waits for the authoritative delivery worker to drain all pending revisions before changing status or clearing controls.
 
 ### `src/bot/commands/*`
 Grouped command handlers split by concern:
@@ -140,6 +146,7 @@ These keep behavior-level regressions in check.
 - `test/bot/keyboard.test.ts`
 - `test/bot/extension-dialogs.test.ts`
 - `test/bot/chat-state.test.ts`
+- `test/bot/stream-segments.test.ts`
 
 These support low-risk refactors of isolated helpers/subsystems.
 

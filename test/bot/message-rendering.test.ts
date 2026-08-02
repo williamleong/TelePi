@@ -7,6 +7,7 @@ import {
   formatMarkdownMessage,
   formatRichMarkdownMessage,
   formatToolSummaryLine,
+  renderAssistantSegment,
   renderDialogPanel,
   renderExtensionError,
   renderExtensionNotice,
@@ -190,6 +191,66 @@ describe("bot message rendering helpers", () => {
     expect(renderedChunks.length).toBeGreaterThan(1);
     expect(renderedChunks.every((chunk) => chunk.text.length <= 4000)).toBe(true);
     expect(renderedChunks.map((chunk) => chunk.sourceText).join("")).toBe(markdown);
+  });
+
+  it("renders assistant segments with a heading, escaped HTML, and a raw fallback", () => {
+    const [chunk] = renderAssistantSegment("Use <tag> & **bold**");
+
+    expect(chunk).toMatchObject({
+      text: "<b>💬 Assistant</b>\nUse &lt;tag&gt; &amp; <b>bold</b>",
+      fallbackText: "💬 Assistant\nUse <tag> & **bold**",
+      parseMode: "HTML",
+      sourceText: "Use <tag> & **bold**",
+    });
+  });
+
+  it("splits assistant segments with headings inside Telegram's message limit", () => {
+    const text = "<".repeat(5_000);
+    const chunks = renderAssistantSegment(text);
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => chunk.text.length <= TELEGRAM_MESSAGE_LIMIT)).toBe(true);
+    expect(chunks.every((chunk) => chunk.fallbackText.length <= TELEGRAM_MESSAGE_LIMIT)).toBe(true);
+    expect(chunks.map((chunk) => chunk.sourceText).join("")).toBe(text);
+    expect(chunks[0]?.fallbackText).toMatch(/^💬 Assistant\n/);
+    expect(chunks[1]?.fallbackText).toMatch(/^💬 Assistant \(continued\)\n/);
+  });
+
+  it("preserves normal assistant source whitespace across a chunk boundary", () => {
+    const text = `${"a".repeat(3_960)}\n  ${"b".repeat(100)}`;
+    const chunks = renderAssistantSegment(text);
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks.map((chunk) => chunk.sourceText).join("")).toBe(text);
+  });
+
+  it("preserves rich Markdown assistant source whitespace across a chunk boundary", () => {
+    const text = `# Report\n${"a".repeat(32_700)}\n  ${"b".repeat(100)}`;
+    const chunks = renderAssistantSegment(text);
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks.map((chunk) => chunk.sourceText).join("")).toBe(text);
+  });
+
+  it("preserves rich Markdown assistant delivery with a Markdown-safe heading", () => {
+    const markdown = [
+      "# Report",
+      "",
+      "| Metric | Value |",
+      "| ------ | ----- |",
+      "| Speed | **42 ms** |",
+    ].join("\n");
+
+    const [chunk] = renderAssistantSegment(markdown);
+
+    expect(chunk).toMatchObject({
+      text: `**💬 Assistant**\n\n${markdown}`,
+      fallbackText: `💬 Assistant\n${markdown}`,
+      delivery: "rich-markdown",
+      sourceText: markdown,
+    });
+    expect(chunk.text.length).toBeLessThanOrEqual(TELEGRAM_RICH_MESSAGE_LIMIT);
+    expect(chunk.fallbackText.length).toBeLessThanOrEqual(TELEGRAM_RICH_MESSAGE_LIMIT);
   });
 
   it("falls back to plain text when Telegram HTML formatting fails", () => {
