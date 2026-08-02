@@ -27,6 +27,7 @@ export interface StreamSegment {
 
 export interface StreamSegments {
   appendAssistantText(delta: string): StreamSegment;
+  sealAssistantSegment(): void;
   appendThinking(event: PiThinkingDelta): StreamSegment;
   startTool(toolName: string, toolCallId: string, args: unknown): StreamSegment;
   updateTool(toolCallId: string, partialResult: unknown): StreamSegment | undefined;
@@ -79,6 +80,12 @@ export function createStreamSegments(): StreamSegments {
       segment.assistantText += delta;
       segment.revision += 1;
       return segment;
+    },
+    sealAssistantSegment() {
+      const current = segments.at(-1);
+      if (current?.kind === "assistant") {
+        current.sealed = true;
+      }
     },
     appendThinking(event) {
       const segment = activeSegment("activity");

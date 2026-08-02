@@ -1430,6 +1430,48 @@ describe("createBot", () => {
     await nextTick();
   });
 
+  it("expires a stale Abort callback without aborting the next run", async () => {
+    let resolveRunA!: () => void;
+    let resolveRunB!: () => void;
+    const prompt = vi.fn()
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { resolveRunA = resolve; }))
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { resolveRunB = resolve; }));
+    const { bot, pi, api } = setupBot({ piSessionOverrides: { prompt } });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "run A" } }));
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+    const runAAbortMessageId = api.sendMessage.mock.results[0]?.value
+      ? (await api.sendMessage.mock.results[0].value).message_id
+      : undefined;
+    expect(runAAbortMessageId).toBeDefined();
+
+    resolveRunA();
+    await vi.waitFor(() => expect(api.deleteMessage).toHaveBeenCalledWith(ALLOWED_CHAT_ID, runAAbortMessageId));
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "run B" } }));
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+    const runBAbortMessageId = api.sendMessage.mock.results[1]?.value
+      ? (await api.sendMessage.mock.results[1].value).message_id
+      : undefined;
+    expect(runBAbortMessageId).toBeDefined();
+    expect(runBAbortMessageId).not.toBe(runAAbortMessageId);
+
+    await bot.handleUpdate(createCallbackUpdate("pi_abort", {
+      callback_query: { message: { message_id: runAAbortMessageId } },
+    }));
+    expect(pi.service.abort).not.toHaveBeenCalled();
+    expect(api.answerCallbackQuery).toHaveBeenLastCalledWith("cb_1", { text: "Abort control expired" });
+
+    await bot.handleUpdate(createCallbackUpdate("pi_abort", {
+      callback_query: { message: { message_id: runBAbortMessageId } },
+    }));
+    expect(pi.service.abort).toHaveBeenCalledTimes(1);
+    expect(api.answerCallbackQuery).toHaveBeenLastCalledWith("cb_1", { text: "Aborting..." });
+
+    resolveRunB();
+    await nextTick();
+  });
+
   it("does not create a fresh session for /abort in an untouched context", async () => {
     const { bot, api, registry } = setupBot();
 
@@ -4632,8 +4674,10 @@ describe("createBot", () => {
   it("handles callback edge cases and the abort button", async () => {
     const abortCallback = setupBot();
     await abortCallback.bot.handleUpdate(createCallbackUpdate("pi_abort"));
-    expect(abortCallback.api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", { text: "Aborting..." });
-    expect(abortCallback.pi.service.abort).toHaveBeenCalledTimes(1);
+    expect(abortCallback.api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", {
+      text: "Abort control expired",
+    });
+    expect(abortCallback.pi.service.abort).not.toHaveBeenCalled();
 
     const expiredWorkspace = setupBot();
     await expiredWorkspace.bot.handleUpdate(createCallbackUpdate("newws_0"));

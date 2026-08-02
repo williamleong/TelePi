@@ -175,9 +175,19 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   const surfacedStartupErrorSignatures = new Map<ContextKey, string>();
   const chatScopedCommandSignatures = new Map<TelegramChatId, string>();
   const callbackMessageContexts = new Map<string, PiSessionContext>();
+  const activeAbortMessages = new Map<ContextKey, number>();
   let nextCommandMenuToken = 0;
 
   const getContextKey = (target: PiSessionContext): ContextKey => getPiSessionContextKey(target);
+
+  const setActiveAbortMessage = (target: PiSessionContext, messageId: number | undefined): void => {
+    const key = getContextKey(target);
+    if (messageId === undefined) {
+      activeAbortMessages.delete(key);
+    } else {
+      activeAbortMessages.set(key, messageId);
+    }
+  };
 
   const cloneTarget = (target: PiSessionContext): PiSessionContext =>
     target.messageThreadId !== undefined
@@ -665,6 +675,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     refreshChatScopedCommands,
     extensionDialogs,
     trackCallbackMessage: registerCallbackMessageContext,
+    setActiveAbortMessage,
     renameForumTopicToSessionName,
     sendBusyReply,
     trySteer: async (target, text) => {
@@ -1004,11 +1015,17 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
 
   bot.callbackQuery("pi_abort", async (ctx) => {
     const target = getTelegramTarget(ctx);
-    await answerCallbackQuerySafely(ctx, { text: "Aborting..." });
-    if (!target) {
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (
+      !target
+      || messageId === undefined
+      || activeAbortMessages.get(getContextKey(target)) !== messageId
+    ) {
+      await answerCallbackQuerySafely(ctx, { text: "Abort control expired" });
       return;
     }
 
+    await answerCallbackQuerySafely(ctx, { text: "Aborting..." });
     await getExistingSession(target)?.abort();
   });
 

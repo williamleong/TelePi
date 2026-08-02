@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -1372,6 +1372,27 @@ export class PiSessionRegistry {
       onSessionChange,
       serviceConfig.workspaceOverride,
     )
+      .catch(async (error) => {
+        if (!serviceConfig.restoredSessionFile || !isInvalidSavedSessionError(error, serviceConfig.restoredSessionFile)) {
+          throw error;
+        }
+
+        try {
+          this.topicSessionStore.delete(key);
+        } catch {
+          console.warn(`Could not remove invalid Pi session for Telegram context ${key}.`);
+        }
+        console.warn(`Saved Pi session for Telegram context ${key} is invalid; starting a new session.`);
+
+        return PiSessionService.create(
+          {
+            ...this.config,
+            telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
+            piSessionPath: undefined,
+          },
+          onSessionChange,
+        );
+      })
       .then((service) => {
         this.inflight.delete(key);
 
@@ -1429,6 +1450,7 @@ export class PiSessionRegistry {
   private createServiceConfig(key: string): {
     config: TelePiConfig;
     workspaceOverride?: string;
+    restoredSessionFile?: string;
   } {
     const bootstrapPath = this.consumeBootstrapSessionPath();
     if (bootstrapPath) {
@@ -1473,6 +1495,7 @@ export class PiSessionRegistry {
     }
 
     const workspace = this.resolveSavedWorkspace(key, saved.sessionFile, saved.workspace);
+    const runtimeSessionPath = resolveSessionPathForRuntime(saved.sessionFile);
     return {
       config: {
         ...this.config,
@@ -1481,6 +1504,7 @@ export class PiSessionRegistry {
         piSessionPath: saved.sessionFile,
       },
       workspaceOverride: workspace,
+      restoredSessionFile: runtimeSessionPath,
     };
   }
 
@@ -1510,6 +1534,32 @@ export class PiSessionRegistry {
     const nextGeneration = (this.generations.get(key) ?? 0) + 1;
     this.generations.set(key, nextGeneration);
     return nextGeneration;
+  }
+}
+
+function isInvalidSavedSessionError(error: unknown, runtimeSessionPath: string): boolean {
+  if (error instanceof Error && error.message === `Session file is not a valid pi session: ${runtimeSessionPath}`) {
+    return true;
+  }
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const filesystemError = error as NodeJS.ErrnoException;
+  if (
+    (filesystemError.code === "EISDIR" || filesystemError.code === "ENOTDIR" || filesystemError.code === "EACCES")
+    && filesystemError.path === runtimeSessionPath
+  ) {
+    return true;
+  }
+
+  if (filesystemError.code !== "EISDIR" || filesystemError.syscall !== "read" || filesystemError.path !== undefined) {
+    return false;
+  }
+
+  try {
+    return statSync(runtimeSessionPath).isDirectory();
+  } catch {
+    return false;
   }
 }
 

@@ -73,6 +73,7 @@ function createPromptHarness(options: {
   onEdit?: (text: string, messageId: number) => Promise<void> | void;
   onMarkup?: (messageId: number, hasAbort: boolean) => Promise<void> | void;
   onDelete?: (messageId: number) => Promise<void> | void;
+  setActiveAbortMessage?: (messageId: number | undefined) => void;
   isBusy?: (target: { chatId: number }) => boolean;
   taskRunnerResult?: "started" | "busy";
   taskRunnerResults?: Array<"started" | "busy">;
@@ -243,6 +244,9 @@ function createPromptHarness(options: {
     extensionDialogs,
     trackCallbackMessage: (_target, messageId) => {
       trackCallbackMessages.push(messageId);
+    },
+    setActiveAbortMessage: (_target, messageId) => {
+      options.setActiveAbortMessage?.(messageId);
     },
     renameForumTopicToSessionName,
     sendBusyReply,
@@ -1246,6 +1250,28 @@ describe("prompt handler", () => {
     ).at(-1)).toMatchObject({ messageId: 1 });
   });
 
+  it("publishes Abort ownership after attachment, migration, and cleanup", async () => {
+    const activeAbortMessages: Array<number | undefined> = [];
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      setActiveAbortMessage: (messageId) => activeAbortMessages.push(messageId),
+      onPrompt: async (callbacks) => {
+        callbacks.onThinkingDelta({ blockKey: "1", delta: "activity" });
+        await harness.waitForOperation(
+          (operation) => operation.kind === "send" && operation.messageId === 1 && operation.hasAbort,
+        );
+        callbacks.onTextDelta("assistant");
+        await harness.waitForOperation(
+          (operation) => operation.kind === "markup" && operation.messageId === 2 && operation.hasAbort,
+        );
+        callbacks.onAgentEnd();
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(activeAbortMessages).toEqual([1, 2, undefined]);
+  });
+
   it("migrates the Abort owner on a kind switch and chunk rollover", async () => {
     let harness!: ReturnType<typeof createPromptHarness>;
     harness = createPromptHarness({
@@ -1606,6 +1632,70 @@ describe("prompt handler", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("keeps post-tool text and its summary out of the delivered pre-tool message", async () => {
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      activityEnabled: false,
+      toolVerbosity: "summary",
+      onPrompt: async (callbacks) => {
+        callbacks.onTextDelta("I'll inspect first.");
+        await harness.waitForOperation(
+          (operation) => operation.kind === "edit"
+            && operation.messageId === 1
+            && operation.text.includes("I'll inspect first."),
+        );
+        callbacks.onToolStart("read", "tool-1", { path: "src/index.ts" });
+        callbacks.onToolEnd("tool-1", false);
+        callbacks.onTextDelta("I found it.");
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+
+    const assistantOperations = harness.operations.filter(
+      (operation): operation is Extract<TelegramOperation, { kind: "send" | "edit" }> =>
+        (operation.kind === "send" || operation.kind === "edit")
+        && operation.text.includes("Assistant"),
+    );
+    const preToolOperation = assistantOperations.find(
+      (operation) => operation.text.includes("I'll inspect first."),
+    );
+    const postToolOperation = assistantOperations.find(
+      (operation) => operation.text.includes("I found it.") && operation.text.includes("🔧 1 tool used: read"),
+    );
+
+    expect(preToolOperation).toBeDefined();
+    expect(postToolOperation).toBeDefined();
+    expect(preToolOperation?.text).not.toContain("I found it.");
+    expect(preToolOperation?.text).not.toContain("🔧 1 tool used: read");
+    expect(postToolOperation?.messageId).not.toBe(preToolOperation?.messageId);
+  });
+
+  it("emits a tool summary after a sealed assistant segment", async () => {
+    const harness = createPromptHarness({
+      activityEnabled: false,
+      toolVerbosity: "summary",
+      onPrompt: (callbacks) => {
+        callbacks.onTextDelta("I'll inspect first.");
+        callbacks.onToolStart("read", "tool-1", { path: "src/index.ts" });
+        callbacks.onToolEnd("tool-1", false);
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+
+    const assistantOperations = harness.operations.filter(
+      (operation): operation is Extract<TelegramOperation, { kind: "send" | "edit" }> =>
+        (operation.kind === "send" || operation.kind === "edit")
+        && operation.text.includes("Assistant"),
+    );
+    expect(assistantOperations.map((operation) => operation.text)).toEqual([
+      expect.stringContaining("I'll inspect first."),
+      expect.stringContaining("🔧 1 tool used: read"),
+    ]);
+    expect(assistantOperations[1]?.messageId).not.toBe(assistantOperations[0]?.messageId);
   });
 
   it("preserves summary tool verbosity after adopting the working message", async () => {

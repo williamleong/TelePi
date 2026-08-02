@@ -250,6 +250,25 @@ describe("bot message rendering helpers", () => {
     expect(chunks.map((chunk) => chunk.sourceText).join("")).toBe(text);
   });
 
+  it.each(["plain", "rich"] as const)(
+    "does not split emoji surrogate pairs in %s assistant chunks",
+    (mode) => {
+      const text = `a${"😀".repeat(20_000)}`;
+      const chunks = renderAssistantSegment(
+        text,
+        mode === "plain" ? "plain" : "rich-markdown",
+      );
+
+      for (const chunk of chunks) {
+        const first = chunk.sourceText.charCodeAt(0);
+        const last = chunk.sourceText.charCodeAt(chunk.sourceText.length - 1);
+        expect(first >= 0xdc00 && first <= 0xdfff).toBe(false);
+        expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+      }
+      expect(chunks.map((chunk) => chunk.sourceText).join("")).toBe(text);
+    },
+  );
+
   it("preserves rich Markdown assistant delivery with a Markdown-safe heading", () => {
     const markdown = [
       "# Report",

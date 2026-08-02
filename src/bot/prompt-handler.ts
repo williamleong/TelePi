@@ -76,6 +76,7 @@ interface CreatePromptHandlerOptions {
   refreshChatScopedCommands: (target: PiSessionContext, piSession: PiSessionService) => Promise<void>;
   extensionDialogs: Pick<ExtensionDialogManager, "openSelect" | "openConfirm" | "openInput">;
   trackCallbackMessage?: (target: PiSessionContext, messageId: number) => void;
+  setActiveAbortMessage?: (target: PiSessionContext, messageId: number | undefined) => void;
   renameForumTopicToSessionName?: (target: PiSessionContext, info: PiSessionInfo) => Promise<void>;
   sendBusyReply: (ctx: Context) => Promise<void>;
   trySteer: (target: PiSessionContext, text: string) => Promise<boolean>;
@@ -124,6 +125,7 @@ async function runPromptFlow(
     refreshChatScopedCommands,
     extensionDialogs,
     trackCallbackMessage,
+    setActiveAbortMessage,
     renameForumTopicToSessionName,
   } = deps;
 
@@ -134,6 +136,10 @@ async function runPromptFlow(
   const toolCounts = new Map<string, number>();
   const dialogBackedToolCallIds = new Set<string>();
   let abortOwnerMessageId: number | undefined;
+  const setAbortOwner = (messageId: number | undefined): void => {
+    abortOwnerMessageId = messageId;
+    setActiveAbortMessage?.(target, messageId);
+  };
   const abortOwnerMessageIds = new Set<number>();
   const abortOwnerCallbackMessageIds = new Set<number>();
   let workingMessageId: number | undefined;
@@ -222,7 +228,7 @@ async function runPromptFlow(
     });
 
     const previousOwnerMessageId = abortOwnerMessageId;
-    abortOwnerMessageId = messageId;
+    setAbortOwner(messageId);
     if (previousOwnerMessageId !== undefined) {
       await clearAbortKeyboard(previousOwnerMessageId);
     }
@@ -242,7 +248,7 @@ async function runPromptFlow(
         replyMarkup: abortKeyboard,
       });
       workingMessageId = message.message_id;
-      abortOwnerMessageId = message.message_id;
+      setAbortOwner(message.message_id);
       registerAbortOwner(message.message_id);
       sendTyping();
     })();
@@ -272,14 +278,14 @@ async function runPromptFlow(
         workingMessageRemoved = true;
         abortOwnerMessageIds.delete(messageId);
         if (abortOwnerMessageId === messageId) {
-          abortOwnerMessageId = undefined;
+          setAbortOwner(undefined);
         }
       } catch (error) {
         workingMessageRemovalFailed = true;
         console.error("Failed to delete Telegram working message", error);
         await clearAbortKeyboard(messageId);
         if (abortOwnerMessageId === messageId) {
-          abortOwnerMessageId = undefined;
+          setAbortOwner(undefined);
         }
       } finally {
         workingMessageRemovalClaimed = false;
@@ -307,7 +313,9 @@ async function runPromptFlow(
       replyMarkup: abortKeyboard,
     });
     workingMessageAdopted = true;
-    abortOwnerMessageId = workingMessageId;
+    if (abortOwnerMessageId !== workingMessageId) {
+      setAbortOwner(workingMessageId);
+    }
     registerAbortOwner(workingMessageId);
     sendTyping();
     return workingMessageId;
@@ -327,7 +335,7 @@ async function runPromptFlow(
     }
 
     if (!hasAbortOwner) {
-      abortOwnerMessageId = message.message_id;
+      setAbortOwner(message.message_id);
       registerAbortOwner(message.message_id);
     } else {
       try {
@@ -400,7 +408,7 @@ async function runPromptFlow(
           replyMarkup: !dialogControlActive && abortOwnerMessageId === undefined ? abortKeyboard : undefined,
         });
         if (!dialogControlActive && abortOwnerMessageId === undefined) {
-          abortOwnerMessageId = message.message_id;
+          setAbortOwner(message.message_id);
           registerAbortOwner(message.message_id);
         }
         streamSegments.setChunkMessageId(segment.id, index, message.message_id);
@@ -553,7 +561,7 @@ async function runPromptFlow(
         execute: async () => {
           await removeWorkingMessage();
           await cleanupAbortOwners();
-          abortOwnerMessageId = undefined;
+          setAbortOwner(undefined);
           dialogControlHandoffCompleted = true;
           if (dialogControlEndingCallId === toolCallId) {
             dialogControlCallId = undefined;
@@ -563,6 +571,7 @@ async function runPromptFlow(
         },
         onError: (error) => {
           console.error("Failed to hand off Telegram dialog controls", error);
+          setAbortOwner(undefined);
           dialogControlHandoffCompleted = true;
           if (dialogControlEndingCallId === toolCallId) {
             dialogControlCallId = undefined;
@@ -647,7 +656,7 @@ async function runPromptFlow(
     const lastAssistant = [...streamSegments.getSegments()].reverse().find(
       (segment) => segment.kind === "assistant",
     );
-    if (!lastAssistant) {
+    if (!lastAssistant || lastAssistant.sealed) {
       streamSegments.appendAssistantText(summary);
       return;
     }
@@ -669,6 +678,7 @@ async function runPromptFlow(
       await drainDelivery();
       await removeWorkingMessage();
       await cleanupAbortOwners();
+      setAbortOwner(undefined);
       deliveryFinalized = true;
       stopTyping();
     })();
@@ -702,6 +712,7 @@ async function runPromptFlow(
         console.error("Failed to send Telegram prompt failure status", telegramError);
       }
       await cleanupAbortOwners();
+      setAbortOwner(undefined);
       deliveryFinalized = true;
       stopTyping();
     })();
@@ -810,6 +821,7 @@ async function runPromptFlow(
         return;
       }
 
+      streamSegments.sealAssistantSegment();
       if (toolVerbosity === "summary") {
         toolCounts.set(toolName, (toolCounts.get(toolName) ?? 0) + 1);
         return;
