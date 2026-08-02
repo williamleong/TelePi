@@ -718,6 +718,24 @@ describe("PiSessionService", () => {
     expect(service.hasActiveSession()).toBe(true);
   });
 
+  it("returns the latest completed exchange preview", async () => {
+    const service = await PiSessionService.create(createConfig());
+    const currentSession = mockState.createdSessions[0]?.session;
+    currentSession.sessionManager.buildSessionContext.mockReturnValue({
+      messages: [
+        { role: "user", content: "Resume this work", timestamp: 1 },
+        { role: "assistant", content: [{ type: "text", text: "First part" }], timestamp: 2 },
+        { role: "assistant", content: [{ type: "text", text: "Second part" }], timestamp: 3 },
+      ],
+    });
+
+    expect(service.getLastExchangePreview()).toEqual({
+      userText: "Resume this work",
+      assistantText: "First part\n\nSecond part",
+    });
+    expect(currentSession.sessionManager.buildSessionContext).toHaveBeenCalled();
+  });
+
   it("creates a new session in the current workspace via AgentSessionRuntime", async () => {
     const service = await PiSessionService.create(createConfig());
     const runtime = mockState.createdRuntimes[0]?.runtime;

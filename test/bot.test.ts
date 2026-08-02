@@ -223,6 +223,7 @@ function createMockPiSession(overrides: Partial<PiSessionService> = {}) {
     isStreaming: vi.fn().mockReturnValue(false),
     hasActiveSession: vi.fn().mockReturnValue(true),
     getCurrentWorkspace: vi.fn().mockReturnValue("/workspace"),
+    getLastExchangePreview: vi.fn().mockReturnValue(undefined),
     abort: vi.fn().mockResolvedValue(undefined),
     newSession: vi.fn().mockResolvedValue({
       info: {
@@ -1479,6 +1480,7 @@ describe("createBot", () => {
     });
     await cancelled.bot.handleUpdate(createTestUpdate({ message: { text: "/sessions /saved/session.jsonl" } }));
     expect(cancelled.api.sendMessage.mock.calls[0]?.[1]).toContain("Session switch was cancelled.");
+    expect(cancelled.pi.service.getLastExchangePreview).not.toHaveBeenCalled();
 
     const byId = setupBot({
       piSessionOverrides: {
@@ -1507,6 +1509,28 @@ describe("createBot", () => {
     );
     expect(failure.api.sendMessage.mock.calls[0]?.[1]).toContain("Failed:");
     expect(failure.api.sendMessage.mock.calls[0]?.[1]).toContain("ambiguous session id");
+    expect(failure.pi.service.getLastExchangePreview).not.toHaveBeenCalled();
+  });
+
+  it("shows recent context after a direct saved-session switch", async () => {
+    const { bot, api } = setupBot({
+      piSessionOverrides: {
+        getLastExchangePreview: vi.fn().mockReturnValue({
+          userText: "What changed?",
+          assistantText: "Updated A.\n\nVerified B.",
+        }),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({
+      message: { text: "/sessions /saved/session.jsonl" },
+    }));
+
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("Switched session");
+    expect(api.sendMessage.mock.calls[1]?.[1]).toContain("Recent context");
+    expect(api.sendMessage.mock.calls[1]?.[1]).toContain("What changed?");
+    expect(api.sendMessage.mock.calls[1]?.[1]).toContain("Updated A.");
+    expect(api.sendMessage.mock.calls[1]?.[1]).toContain("Verified B.");
   });
 
   it("renames forum topics to the session name after direct session switches", async () => {
@@ -1672,6 +1696,7 @@ describe("createBot", () => {
     await cancelled.bot.handleUpdate(createTestUpdate({ message: { text: "/sessions" } }));
     await cancelled.bot.handleUpdate(createCallbackUpdate("switch_0"));
     expect(cancelled.api.editMessageText.mock.calls.at(-1)?.[2]).toContain("Session switch was cancelled.");
+    expect(cancelled.pi.service.getLastExchangePreview).not.toHaveBeenCalled();
 
     const expired = setupBot();
     await expired.bot.handleUpdate(createCallbackUpdate("switch_0"));
@@ -1700,6 +1725,24 @@ describe("createBot", () => {
 
     resolvePrompt();
     await firstPrompt;
+  });
+
+  it("shows recent context after an inline saved-session switch", async () => {
+    const { bot, api } = setupBot({
+      piSessionOverrides: {
+        getLastExchangePreview: vi.fn().mockReturnValue({
+          userText: "Previous question",
+          assistantText: "Previous answer",
+        }),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/sessions" } }));
+    await bot.handleUpdate(createCallbackUpdate("switch_0"));
+
+    expect(api.editMessageText.mock.calls.at(-1)?.[2]).toContain("Switched!");
+    expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Recent context");
+    expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Previous answer");
   });
 
   it("surfaces startup diagnostics after successful direct session switches", async () => {
@@ -4254,7 +4297,7 @@ describe("createBot", () => {
   });
 
   it("handles switch callback error", async () => {
-    const { bot, api } = setupBot({
+    const { bot, pi, api } = setupBot({
       piSessionOverrides: {
         switchSession: vi.fn().mockRejectedValue(new Error("switch exploded")),
       },
@@ -4267,6 +4310,7 @@ describe("createBot", () => {
 
     expect(api.editMessageText.mock.calls.at(-1)?.[2]).toContain("Failed:");
     expect(api.editMessageText.mock.calls.at(-1)?.[2]).toContain("switch exploded");
+    expect(pi.service.getLastExchangePreview).not.toHaveBeenCalled();
   });
 
   it("handles newws callback error", async () => {
