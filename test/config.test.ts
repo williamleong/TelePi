@@ -3,6 +3,29 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { loadConfig } from "../src/config.js";
+import {
+  getDefaultTelePiStateDir,
+  getDefaultTopicSessionStatePath,
+} from "../src/paths.js";
+
+describe("platform paths", () => {
+  it("uses XDG state storage on Linux", () => {
+    expect(getDefaultTelePiStateDir("/home/test", "linux", "/state")).toBe("/state/telepi");
+    expect(getDefaultTelePiStateDir("/home/test", "linux")).toBe("/home/test/.local/state/telepi");
+  });
+
+  it("uses Application Support on macOS", () => {
+    expect(getDefaultTelePiStateDir("/Users/test", "darwin")).toBe(
+      "/Users/test/Library/Application Support/TelePi",
+    );
+  });
+
+  it("uses the default topic session state filename", () => {
+    expect(getDefaultTopicSessionStatePath("/home/test", "linux", "/state")).toBe(
+      "/state/telepi/topic-sessions.json",
+    );
+  });
+});
 
 describe("loadConfig", () => {
   const originalEnv = process.env;
