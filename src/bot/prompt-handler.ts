@@ -235,6 +235,22 @@ async function runPromptFlow(
     }
   };
 
+  const adoptWorkingMessage = async (rendered: RenderedText): Promise<number | undefined> => {
+    if (workingMessageId === undefined || workingMessageAdopted) {
+      return undefined;
+    }
+
+    await safeEditMessage(bot, target, workingMessageId, rendered.text, {
+      parseMode: rendered.parseMode,
+      fallbackText: rendered.fallbackText,
+      delivery: rendered.delivery,
+      replyMarkup: abortKeyboard,
+    });
+    workingMessageAdopted = true;
+    sendTyping();
+    return workingMessageId;
+  };
+
   const latestOutputMessageId = (): number | undefined => {
     for (const segment of [...streamSegments.getSegments()].reverse()) {
       for (const chunk of [...segment.chunks].reverse()) {
@@ -277,22 +293,13 @@ async function runPromptFlow(
         continue;
       }
 
-      if (
-        current.messageId === undefined
-        && workingMessageId !== undefined
-        && !workingMessageAdopted
-      ) {
-        await safeEditMessage(bot, target, workingMessageId, rendered.text, {
-          parseMode: rendered.parseMode,
-          fallbackText: rendered.fallbackText,
-          delivery: rendered.delivery,
-          replyMarkup: abortKeyboard,
-        });
-        streamSegments.setChunkMessageId(segment.id, index, workingMessageId);
-        workingMessageAdopted = true;
-        changed = true;
-        sendTyping();
-        continue;
+      if (current.messageId === undefined) {
+        const adoptedMessageId = await adoptWorkingMessage(rendered);
+        if (adoptedMessageId !== undefined) {
+          streamSegments.setChunkMessageId(segment.id, index, adoptedMessageId);
+          changed = true;
+          continue;
+        }
       }
 
       if (current.messageId === undefined) {
@@ -676,14 +683,20 @@ async function runPromptFlow(
       }
       const messageText = renderToolStartMessage(toolName);
       enqueueLegacyDelivery(async () => {
-        const message = await sendTextMessage(bot.api, target, messageText.text, {
-          parseMode: messageText.parseMode,
-          fallbackText: messageText.fallbackText,
-        });
         const state = toolStates.get(toolCallId);
         if (!state) {
           return;
         }
+        const adoptedMessageId = await adoptWorkingMessage(messageText);
+        if (adoptedMessageId !== undefined) {
+          state.messageId = adoptedMessageId;
+          return;
+        }
+
+        const message = await sendTextMessage(bot.api, target, messageText.text, {
+          parseMode: messageText.parseMode,
+          fallbackText: messageText.fallbackText,
+        });
         state.messageId = message.message_id;
         try {
           await migrateAbortOwner(message.message_id);
@@ -733,6 +746,11 @@ async function runPromptFlow(
           return;
         }
         enqueueLegacyDelivery(async () => {
+          const adoptedMessageId = await adoptWorkingMessage(state.finalStatus!);
+          if (adoptedMessageId !== undefined) {
+            return;
+          }
+
           const message = await sendTextMessage(bot.api, target, state.finalStatus!.text, {
             parseMode: state.finalStatus!.parseMode,
             fallbackText: state.finalStatus!.fallbackText,

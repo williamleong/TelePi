@@ -743,7 +743,7 @@ describe("prompt handler", () => {
     await expect(harness.run()).resolves.toBe(true);
     expect(harness.operations).toContainEqual(expect.objectContaining({
       kind: "edit",
-      messageId: 2,
+      messageId: 1,
       text: expect.stringContaining("running command"),
     }));
   });
@@ -763,8 +763,8 @@ describe("prompt handler", () => {
 
     await expect(harness.run()).resolves.toBe(true);
     expect(harness.operations).toContainEqual(expect.objectContaining({
-      kind: "send",
-      messageId: 2,
+      kind: "edit",
+      messageId: 1,
       text: expect.stringContaining("running command"),
     }));
   });
@@ -1103,8 +1103,8 @@ describe("prompt handler", () => {
       const harness = createPromptHarness({
         activityEnabled: false,
         toolVerbosity,
-        onSend: (text, messageId) => {
-          if (messageId === 2 && text.includes(toolDeliveryText)) {
+        onEdit: (text, messageId) => {
+          if (messageId === 1 && text.includes(toolDeliveryText)) {
             return Promise.reject(new Error("activity-off tool delivery failed"));
           }
         },
@@ -1288,8 +1288,8 @@ describe("prompt handler", () => {
     harness = createPromptHarness({
       activityEnabled: false,
       toolVerbosity: "all",
-      onSend: async (text, messageId) => {
-        if (messageId === 2 && text.includes("Running:")) {
+      onEdit: async (text, messageId) => {
+        if (messageId === 1 && text.includes("Running:")) {
           toolStartStarted.resolve();
           await toolStartRelease.promise;
         }
@@ -1318,38 +1318,40 @@ describe("prompt handler", () => {
     toolStartRelease.resolve();
     await expect(result).resolves.toBe(true);
 
+    const workingAbort = harness.operations.findIndex(
+      (operation) => operation.kind === "send" && operation.messageId === 1 && operation.hasAbort,
+    );
     const toolFinish = harness.operations.findIndex(
-      (operation) => operation.kind === "edit" && operation.messageId === 2 && operation.text.includes("❌"),
+      (operation) => operation.kind === "edit" && operation.messageId === 1 && operation.text.includes("❌"),
     );
-    const attachToolAbort = harness.operations.findIndex(
-      (operation) => operation.kind === "markup" && operation.messageId === 2 && operation.hasAbort,
+    const clearWorkingAbort = harness.operations.findIndex(
+      (operation) => operation.kind === "markup" && operation.messageId === 1 && !operation.hasAbort,
     );
-    const clearToolAbort = harness.operations.findIndex(
-      (operation) => operation.kind === "markup" && operation.messageId === 2 && !operation.hasAbort,
-    );
-    expect(toolFinish).toBeGreaterThanOrEqual(0);
-    expect(attachToolAbort).toBeGreaterThanOrEqual(0);
-    expect(clearToolAbort).toBeGreaterThan(toolFinish);
+    expect(workingAbort).toBeGreaterThanOrEqual(0);
+    expect(toolFinish).toBeGreaterThan(workingAbort);
+    expect(clearWorkingAbort).toBeGreaterThan(toolFinish);
   });
 
   it.each(["all", "errors-only"] as const)(
-    "serializes an earlier activity-off %s tool delivery before later assistant text and keeps one Abort owner",
+    "keeps activity-off %s tool output visibly before later assistant text",
     async (toolVerbosity) => {
       const toolDeliveryRelease = deferred();
       const toolDeliveryStarted = deferred();
       const assistantEmitted = deferred();
       const promptRelease = deferred();
       const toolDeliveryText = toolVerbosity === "all" ? "Running:" : "❌";
+      const waitForToolDelivery = async (text: string): Promise<void> => {
+        if (text.includes(toolDeliveryText)) {
+          toolDeliveryStarted.resolve();
+          await toolDeliveryRelease.promise;
+        }
+      };
       let harness!: ReturnType<typeof createPromptHarness>;
       harness = createPromptHarness({
         activityEnabled: false,
         toolVerbosity,
-        onSend: async (text, messageId) => {
-          if (messageId === 2 && text.includes(toolDeliveryText)) {
-            toolDeliveryStarted.resolve();
-            await toolDeliveryRelease.promise;
-          }
-        },
+        onSend: waitForToolDelivery,
+        onEdit: waitForToolDelivery,
         onPrompt: async (callbacks) => {
           callbacks.onToolStart("bash", "tool-1", {});
           callbacks.onToolUpdate("tool-1", "stderr");
@@ -1374,13 +1376,14 @@ describe("prompt handler", () => {
         await assistantEmitted.promise;
         await vi.advanceTimersByTimeAsync(0);
         expect(harness.operations).not.toContainEqual(
-          expect.objectContaining({ kind: "edit", messageId: 1, text: expect.stringContaining("later assistant text") }),
+          expect.objectContaining({ text: expect.stringContaining("later assistant text") }),
         );
 
         toolDeliveryRelease.resolve();
         await vi.advanceTimersByTimeAsync(0);
         await harness.waitForOperation(
-          (operation) => operation.kind === "edit" && operation.messageId === 1 && operation.text.includes("later assistant text"),
+          (operation) => (operation.kind === "send" || operation.kind === "edit")
+            && operation.text.includes("later assistant text"),
         );
         await harness.waitForOperation(
           (operation) => operation.kind === "markup" && operation.messageId === 2 && operation.hasAbort,
@@ -1388,27 +1391,21 @@ describe("prompt handler", () => {
         await harness.waitForOperation(
           (operation) => operation.kind === "markup" && operation.messageId === 1 && !operation.hasAbort,
         );
-        if (toolVerbosity === "all") {
-          await harness.waitForOperation(
-            (operation) => operation.kind === "edit" && operation.messageId === 2 && operation.text.includes("❌"),
-          );
-        }
-
         const outputOperations = harness.operations.filter(
           (operation): operation is Extract<TelegramOperation, { kind: "send" | "edit" }> =>
             operation.kind === "send" || operation.kind === "edit",
         );
-        expect(outputOperations.map((operation) => [operation.kind, operation.messageId])).toEqual(
-          toolVerbosity === "all"
-            ? [["send", 1], ["send", 2], ["edit", 1], ["edit", 2]]
-            : [["send", 1], ["send", 2], ["edit", 1]],
-        );
-        expect(outputOperations[0].text).toMatch(/Working/i);
-        expect(outputOperations[1].text).toContain(toolDeliveryText);
-        expect(outputOperations[2].text).toContain("later assistant text");
-        if (toolVerbosity === "all") {
-          expect(outputOperations[3].text).toContain("❌");
+        const toolOutputs = outputOperations.filter((operation) => operation.text.includes(toolDeliveryText));
+        const assistantOutput = outputOperations.find((operation) => operation.text.includes("later assistant text"));
+        if (!assistantOutput) {
+          throw new Error("Expected later assistant text to be delivered");
         }
+
+        expect(toolOutputs).toEqual(expect.arrayContaining([
+          expect.objectContaining({ kind: "edit", messageId: 1 }),
+        ]));
+        expect(assistantOutput).toMatchObject({ kind: "send", messageId: 2 });
+        expect(assistantOutput.messageId).toBeGreaterThan(Math.max(...toolOutputs.map((operation) => operation.messageId)));
         const abortOwners = new Set<number>();
         const ownersAfterMigrations: number[][] = [];
         for (const operation of harness.operations) {
@@ -1424,11 +1421,19 @@ describe("prompt handler", () => {
             }
           }
         }
-        expect(ownersAfterMigrations).toEqual([[2], [1]]);
-        expect(harness.trackCallbackMessages).toEqual([1, 2, 1]);
+        expect(ownersAfterMigrations).toEqual([[2]]);
+        expect(harness.trackCallbackMessages).toEqual([1, 2]);
 
         promptRelease.resolve();
         await expect(result).resolves.toBe(true);
+        expect(harness.operations.filter(
+          (operation): operation is Extract<TelegramOperation, { kind: "send" | "edit" }> =>
+            operation.kind === "send" || operation.kind === "edit",
+        ).map((operation) => [operation.kind, operation.messageId])).toEqual(
+          toolVerbosity === "all"
+            ? [["send", 1], ["edit", 1], ["send", 2], ["edit", 1]]
+            : [["send", 1], ["edit", 1], ["send", 2]],
+        );
         for (const operation of harness.operations) {
           if (operation.kind === "markup" && !operation.hasAbort) {
             abortOwners.delete(operation.messageId);
@@ -1451,8 +1456,8 @@ describe("prompt handler", () => {
     harness = createPromptHarness({
       activityEnabled: false,
       toolVerbosity: "errors-only",
-      onSend: async (text, messageId) => {
-        if (messageId === 2 && text.includes("❌")) {
+      onEdit: async (text, messageId) => {
+        if (messageId === 1 && text.includes("❌")) {
           toolErrorStarted.resolve();
           await toolErrorRelease.promise;
         }
@@ -1480,18 +1485,18 @@ describe("prompt handler", () => {
     toolErrorRelease.resolve();
     await expect(result).resolves.toBe(true);
 
+    const workingAbort = harness.operations.findIndex(
+      (operation) => operation.kind === "send" && operation.messageId === 1 && operation.hasAbort,
+    );
     const toolError = harness.operations.findIndex(
-      (operation) => operation.kind === "send" && operation.messageId === 2 && operation.text.includes("❌"),
+      (operation) => operation.kind === "edit" && operation.messageId === 1 && operation.text.includes("❌"),
     );
-    const attachToolAbort = harness.operations.findIndex(
-      (operation) => operation.kind === "markup" && operation.messageId === 2 && operation.hasAbort,
+    const clearWorkingAbort = harness.operations.findIndex(
+      (operation) => operation.kind === "markup" && operation.messageId === 1 && !operation.hasAbort,
     );
-    const clearToolAbort = harness.operations.findIndex(
-      (operation) => operation.kind === "markup" && operation.messageId === 2 && !operation.hasAbort,
-    );
-    expect(toolError).toBeGreaterThanOrEqual(0);
-    expect(attachToolAbort).toBeGreaterThanOrEqual(0);
-    expect(clearToolAbort).toBeGreaterThan(toolError);
+    expect(workingAbort).toBeGreaterThanOrEqual(0);
+    expect(toolError).toBeGreaterThan(workingAbort);
+    expect(clearWorkingAbort).toBeGreaterThan(toolError);
 
     const callbacks = harness.callbacks();
     callbacks?.onToolStart("bash", "late-tool", {});
