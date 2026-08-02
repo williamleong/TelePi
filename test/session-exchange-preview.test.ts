@@ -64,6 +64,13 @@ describe("buildLastExchangePreview", () => {
     expect(buildLastExchangePreview([user("Unanswered")])).toBeUndefined();
   });
 
+  it("keeps a completed exchange when the user text is whitespace-only", () => {
+    expect(buildLastExchangePreview([
+      user("   \n\t"),
+      assistant([{ type: "text", text: "Visible answer" }]),
+    ])).toEqual({ userText: "", assistantText: "Visible answer" });
+  });
+
   it("bounds user text and preserves both ends of long assistant text", () => {
     const result = buildLastExchangePreview([
       user("u".repeat(USER_PREVIEW_LIMIT + 100)),

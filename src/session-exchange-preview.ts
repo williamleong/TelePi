@@ -18,7 +18,7 @@ export function buildLastExchangePreview(
   let latestCompleted: PiSessionExchangePreview | undefined;
 
   const finishCurrent = (): void => {
-    if (!currentUserText || currentAssistantParts.length === 0) return;
+    if (currentUserText === undefined || currentAssistantParts.length === 0) return;
     latestCompleted = {
       userText: truncateUserText(currentUserText),
       assistantText: truncateAssistantText(currentAssistantParts.join("\n\n")),
