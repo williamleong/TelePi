@@ -1,16 +1,26 @@
 # TelePi
 
 > [!NOTE]
-> This is a personal-use fork of [benedict2310/TelePi](https://github.com/benedict2310/TelePi).
+> This is a personal-use fork of
+> [benedict2310/TelePi](https://github.com/benedict2310/TelePi), developed
+> in Pi’s spirit: adapt the tool to your workflow, not your workflow to the tool.
 >
-> Changes from upstream:
+> Compared with upstream TelePi, this fork:
 >
-> - Upgrades the embedded Pi SDK runtime to 0.83.0, including updated session APIs and cross-process credential reloading.
-> - Adds richer Telegram output and an optional `/activity` transcript for provider thinking and tool activity.
-> - Shows recent conversation context when resuming a session.
-> - Synchronizes Pi session names and Telegram forum topic names in both directions.
-> - Supports fallback rendering for `ask_user` and other extension dialogs.
-> - Includes reliability fixes for prompt inbox durability, callbacks, streaming, downloads, handoff, and systemd release packaging.
+> - Updates the embedded Pi packages from upstream 0.82.1 to 0.83.0 and carries
+>   the required compatibility adaptations.
+> - Persists per-chat/topic Pi-session mappings across service restarts and
+>   discards missing or invalid saved-session records safely.
+> - Adds chronological Telegram activity segments for Pi thinking, tool state,
+>   and foreground Agent progress alongside assistant output.
+> - Allows plain-text steering of an active run and makes inline Abort controls
+>   run-scoped, rejecting stale controls.
+> - Adds an `ask_user`-compatible fallback from unsupported custom UI to Telegram
+>   dialogs, with dialog and Abort handoff hardening.
+> - Synchronizes Pi session names with Telegram forum-topic titles in both
+>   directions and shows a bounded recent exchange after session resume.
+> - Hardens callback acknowledgements, Unicode-safe formatted-response chunking,
+>   bounded streamed downloads, and failed prompt-inbox preservation.
 
 **Run your Pi coding agent from Telegram: voice prompts, screenshots, session handoff, and terminal handback.**
 
