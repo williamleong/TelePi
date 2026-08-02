@@ -1,16 +1,28 @@
 # TelePi
 
 > [!NOTE]
-> This is a personal-use fork of [benedict2310/TelePi](https://github.com/benedict2310/TelePi).
+> This is a personal-use fork of
+> [benedict2310/TelePi](https://github.com/benedict2310/TelePi), developed
+> in Pi’s spirit: adapt the tool to your workflow, not your workflow to the tool.
 >
-> Changes from upstream:
+> Compared with upstream TelePi, this fork:
 >
-> - Upgrades the embedded Pi SDK runtime to 0.83.0, including updated session APIs and cross-process credential reloading.
-> - Adds richer Telegram output and an optional `/activity` transcript for provider thinking and tool activity.
-> - Shows recent conversation context when resuming a session.
-> - Synchronizes Pi session names and Telegram forum topic names in both directions.
-> - Supports fallback rendering for `ask_user` and other extension dialogs.
-> - Includes reliability fixes for prompt inbox durability, callbacks, streaming, downloads, handoff, and systemd release packaging.
+> - Tracks Pi SDK 0.83.0, including updated session APIs and cross-process
+>   credential reloading.
+> - Keeps Telegram chats and forum topics in independent Pi sessions, persists
+>   their mappings across restarts, and safely recovers missing or invalid sessions.
+> - Streams assistant responses, thinking, tool activity, and Agent progress
+>   chronologically with richer Telegram formatting.
+> - Supports steering active Pi runs and provides immediate, run-scoped Abort
+>   controls that cannot cancel a later task.
+> - Exposes Pi commands, prompt templates, skills, and compatible extension
+>   commands through Telegram’s command menu and picker.
+> - Renders extension interactions as native Telegram select, confirm, and input
+>   dialogs, including `ask_user` custom-UI fallbacks.
+> - Synchronizes Pi session names with Telegram forum-topic names and shows recent
+>   conversation context when resuming.
+> - Hardens prompt delivery, callbacks, Unicode chunking, downloads, handoff,
+>   persistence, and Linux service packaging.
 
 **Run your Pi coding agent from Telegram: voice prompts, screenshots, session handoff, and terminal handback.**
 
