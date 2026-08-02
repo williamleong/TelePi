@@ -1,5 +1,17 @@
 # TelePi
 
+> [!NOTE]
+> This is a personal-use fork of [benedict2310/TelePi](https://github.com/benedict2310/TelePi).
+>
+> Changes from upstream:
+>
+> - Upgrades the embedded Pi SDK runtime to 0.83.0, including updated session APIs and cross-process credential reloading.
+> - Adds richer Telegram output and an optional `/activity` transcript for provider thinking and tool activity.
+> - Shows recent conversation context when resuming a session.
+> - Synchronizes Pi session names and Telegram forum topic names in both directions.
+> - Supports fallback rendering for `ask_user` and other extension dialogs.
+> - Includes reliability fixes for prompt inbox durability, callbacks, streaming, downloads, handoff, and systemd release packaging.
+
 **Run your Pi coding agent from Telegram: voice prompts, screenshots, session handoff, and terminal handback.**
 
 TelePi is a Telegram bridge for the [Pi coding agent](https://github.com/badlogic/pi-mono). It runs locally on your machine, opens real Pi sessions in your repositories, lets you continue from your phone, and hands the exact same session back to the terminal when you return.
