@@ -4450,16 +4450,25 @@ describe("createBot", () => {
 
       if (toolVerbosity === "summary") {
         const statusCallIndex = flow.api.sendMessage.mock.calls.findIndex((call) => String(call[1]).includes("Working"));
-        const summaryCallIndex = flow.api.sendMessage.mock.calls.findIndex(
-          (call) => String(call[1]).includes("🔧 1 tool used: bash"),
-        );
         const status = await flow.api.sendMessage.mock.results[statusCallIndex]?.value;
-        const summary = await flow.api.sendMessage.mock.results[summaryCallIndex]?.value;
-        expect(summaryCallIndex).toBeGreaterThan(statusCallIndex);
-        expect(summary.message_id).toBeGreaterThan(status.message_id);
-        expect(flow.api.editMessageText.mock.calls.some(
-          (call) => call[1] === status.message_id && String(call[2]).includes("🔧 1 tool used: bash"),
-        )).toBe(false);
+        const sentMessages = await Promise.all(flow.api.sendMessage.mock.results.map((result) => result.value));
+        const outputMessages = sentMessages.filter((message) => message?.message_id !== status.message_id);
+        const messageTexts = new Map<number, string>();
+        for (const message of outputMessages) {
+          messageTexts.set(message.message_id, String(message.text ?? ""));
+        }
+        for (const call of flow.api.editMessageText.mock.calls) {
+          if (typeof call[1] === "number" && call[1] !== status.message_id) {
+            messageTexts.set(call[1], String(call[2]));
+          }
+        }
+
+        const summaryText = "🔧 1 tool used: bash";
+        const summaryMessage = [...messageTexts.entries()].find(([, text]) => text.includes(summaryText));
+        expect(summaryMessage).toBeDefined();
+        expect(summaryMessage?.[1]).toContain("Final answer");
+        expect(summaryMessage?.[0]).toBeGreaterThan(status.message_id);
+        expect(messageTexts.get(status.message_id) ?? "").not.toContain(summaryText);
         return;
       }
 
