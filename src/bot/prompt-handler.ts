@@ -11,6 +11,7 @@ import {
   renderAssistantSegment,
   renderExtensionError,
   renderExtensionNotice,
+  renderPrefixedError,
   renderPromptFailure,
   renderToolEndMessage,
   renderToolStartMessage,
@@ -34,6 +35,7 @@ import type { PiSessionContext, PiSessionInfo, PiSessionService } from "../pi-se
 
 export interface HandleUserPromptOptions {
   waitForCompletion?: boolean;
+  allowSteering?: boolean;
 }
 
 function stringifyToolUpdate(value: unknown): string {
@@ -72,9 +74,10 @@ interface CreatePromptHandlerOptions {
   trackCallbackMessage?: (target: PiSessionContext, messageId: number) => void;
   renameForumTopicToSessionName?: (target: PiSessionContext, info: PiSessionInfo) => Promise<void>;
   sendBusyReply: (ctx: Context) => Promise<void>;
+  trySteer: (target: PiSessionContext, text: string) => Promise<boolean>;
 }
 
-type PromptFlowDeps = Omit<CreatePromptHandlerOptions, "isBusy" | "taskRunner" | "sendBusyReply">;
+type PromptFlowDeps = Omit<CreatePromptHandlerOptions, "isBusy" | "taskRunner" | "sendBusyReply" | "trySteer">;
 
 type PromptTaskOutcome = "completed" | "failed";
 
@@ -125,8 +128,6 @@ async function runPromptFlow(
   const streamSegments = createStreamSegments();
   const toolStates = new Map<string, ToolState>();
   const toolCounts = new Map<string, number>();
-  let statusMessageId: number | undefined;
-  let workingMessagePromise: Promise<void> | undefined;
   let abortOwnerMessageId: number | undefined;
   const abortOwnerMessageIds = new Set<number>();
   let deliveryTimer: NodeJS.Timeout | undefined;
@@ -189,45 +190,16 @@ async function runPromptFlow(
       return;
     }
 
+    abortOwnerMessageIds.add(messageId);
+    trackCallbackMessage?.(target, messageId);
     await bot.api.editMessageReplyMarkup(target.chatId, messageId, {
       reply_markup: abortKeyboard,
     });
-    trackCallbackMessage?.(target, messageId);
-    abortOwnerMessageIds.add(messageId);
 
     const previousOwnerMessageId = abortOwnerMessageId;
+    abortOwnerMessageId = messageId;
     if (previousOwnerMessageId !== undefined) {
       await clearAbortKeyboard(previousOwnerMessageId);
-    }
-    abortOwnerMessageId = messageId;
-  };
-
-  const ensureWorkingMessage = async (): Promise<void> => {
-    if (statusMessageId !== undefined) {
-      return;
-    }
-    if (workingMessagePromise) {
-      return workingMessagePromise;
-    }
-
-    workingMessagePromise = (async () => {
-      const message = await sendTextMessage(bot.api, target, "<i>⏳ Working…</i>", {
-        fallbackText: "⏳ Working…",
-        replyMarkup: abortKeyboard,
-      });
-      statusMessageId = message.message_id;
-      abortOwnerMessageId = message.message_id;
-      abortOwnerMessageIds.add(message.message_id);
-      trackCallbackMessage?.(target, message.message_id);
-      sendTyping();
-    })();
-
-    try {
-      await workingMessagePromise;
-    } catch (error) {
-      console.error("Failed to send Telegram working message", error);
-    } finally {
-      workingMessagePromise = undefined;
     }
   };
 
@@ -254,6 +226,11 @@ async function runPromptFlow(
     return renderAssistantSegment(segment.assistantText, delivery);
   };
 
+  const recordDeliveryFailure = (error: unknown, message: string): void => {
+    console.error(message, error);
+    deliveryFailure ??= error;
+  };
+
   const deliverSegment = async (segment: StreamSegment): Promise<void> => {
     const revision = segment.revision;
     const previousChunks = segment.chunks;
@@ -273,7 +250,13 @@ async function runPromptFlow(
           parseMode: rendered.parseMode,
           fallbackText: rendered.fallbackText,
           delivery: rendered.delivery,
+          replyMarkup: abortOwnerMessageId === undefined ? abortKeyboard : undefined,
         });
+        if (abortOwnerMessageId === undefined) {
+          abortOwnerMessageId = message.message_id;
+          abortOwnerMessageIds.add(message.message_id);
+          trackCallbackMessage?.(target, message.message_id);
+        }
         streamSegments.setChunkMessageId(segment.id, index, message.message_id);
         changed = true;
         sendTyping();
@@ -368,7 +351,7 @@ async function runPromptFlow(
                 await deliverSegment(segment);
               } catch (error) {
                 if (segment.kind === "activity") {
-                  console.error("Failed to update Telegram activity transcript", error);
+                  recordDeliveryFailure(error, "Failed to update Telegram activity transcript");
                   streamSegments.markDeliveryFailed(segment.id);
                   continue;
                 }
@@ -381,9 +364,7 @@ async function runPromptFlow(
         }
       },
       onError: (error) => {
-        if (deliveryFailure === undefined) {
-          deliveryFailure = error;
-        }
+        recordDeliveryFailure(error, "Failed to deliver Telegram prompt output");
       },
     };
     segmentDeliveryOperation = operation;
@@ -405,12 +386,9 @@ async function runPromptFlow(
 
     deliveryQueue.push({
       readyAt: Date.now(),
-      execute: async () => {
-        try {
-          await delivery();
-        } catch (error) {
-          console.error(errorMessage, error);
-        }
+      execute: delivery,
+      onError: (error) => {
+        recordDeliveryFailure(error, errorMessage);
       },
     });
     void runDeliveryWorker();
@@ -428,7 +406,7 @@ async function runPromptFlow(
 
   const forceSegmentDelivery = (): Promise<void> => {
     clearDeliveryTimer();
-    if (deliveryFailure || streamSegments.getDirtySegments().length === 0) {
+    if (streamSegments.getDirtySegments().length === 0) {
       return deliveryWorkerPromise ?? Promise.resolve();
     }
     if (segmentDeliveryOperation) {
@@ -483,14 +461,6 @@ async function runPromptFlow(
     lastAssistant.revision += 1;
   };
 
-  const updateStatus = async (text: string, fallbackText: string): Promise<void> => {
-    if (statusMessageId === undefined) {
-      await safeReply(ctx, text, { fallbackText }, target);
-      return;
-    }
-    await safeEditMessage(bot, target, statusMessageId, text, { fallbackText });
-  };
-
   const finalizeSuccess = async (): Promise<void> => {
     if (finalizationPromise) {
       return finalizationPromise;
@@ -500,7 +470,6 @@ async function runPromptFlow(
       deliveryFinalizing = true;
       appendToolSummary();
       await drainDelivery();
-      await updateStatus("<b>✅ Done</b>", "✅ Done");
       await cleanupAbortOwners();
       deliveryFinalized = true;
       stopTyping();
@@ -518,7 +487,7 @@ async function runPromptFlow(
       await drainDeliveryAfterFailure();
       const status = renderPromptFailure("", error);
       try {
-        await updateStatus(status, status);
+        await safeReply(ctx, status, { fallbackText: status }, target);
       } catch (telegramError) {
         console.error("Failed to send Telegram prompt failure status", telegramError);
       }
@@ -548,8 +517,6 @@ async function runPromptFlow(
   } else {
     void refreshChatScopedCommands(target, piSession);
   }
-
-  await ensureWorkingMessage();
 
   let unsubscribe: (() => void) | undefined;
   try {
@@ -750,8 +717,22 @@ export function createPromptHandler(options: CreatePromptHandlerOptions): Handle
     isBusy,
     taskRunner,
     sendBusyReply,
+    trySteer,
     ...promptFlowDeps
   } = options;
+
+  const acceptSteering = async (ctx: Context, target: PiSessionContext, text: string): Promise<boolean> => {
+    try {
+      return await trySteer(target, text);
+    } catch (error) {
+      const failure = renderPrefixedError("Steering failed", error);
+      await safeReply(ctx, failure.text, {
+        fallbackText: failure.fallbackText,
+        parseMode: failure.parseMode,
+      }, target);
+      return true;
+    }
+  };
 
   return async (
     ctx: Context,
@@ -761,7 +742,13 @@ export function createPromptHandler(options: CreatePromptHandlerOptions): Handle
     images?: ImageContent[],
     options?: HandleUserPromptOptions,
   ): Promise<boolean> => {
+    const steerableInput = options?.allowSteering !== false
+      && preloadedSlashCommands === undefined
+      && (!images || images.length === 0);
     if (isBusy(target)) {
+      if (steerableInput && await acceptSteering(ctx, target, userText)) {
+        return true;
+      }
       await sendBusyReply(ctx);
       return false;
     }
@@ -776,6 +763,9 @@ export function createPromptHandler(options: CreatePromptHandlerOptions): Handle
       },
     );
     if (result === "busy") {
+      if (steerableInput && await acceptSteering(ctx, target, userText)) {
+        return true;
+      }
       await sendBusyReply(ctx);
       return false;
     }

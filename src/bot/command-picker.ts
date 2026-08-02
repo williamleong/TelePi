@@ -3,6 +3,7 @@ import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 
 import { escapeHTML } from "../format.js";
 import type { PiSessionContext, PiSessionService } from "../pi-session.js";
+import type { HandleUserPrompt } from "./prompt-handler.js";
 import { renderPrefixedError, trimLine, type RenderedText } from "./message-rendering.js";
 import { KEYBOARD_PAGE_SIZE, NOOP_PAGE_CALLBACK_DATA } from "./keyboard.js";
 import {
@@ -115,12 +116,7 @@ export function createCommandPickerHandlers(deps: {
   getOrCreateSession: (target: PiSessionContext) => Promise<PiSessionService>;
   syncChatScopedCommands: (target: PiSessionContext, slashCommands: SlashCommandInfo[]) => Promise<void>;
   isBusy: (target: PiSessionContext) => boolean;
-  handleUserPrompt: (
-    ctx: Context,
-    target: PiSessionContext,
-    userText: string,
-    preloadedSlashCommands?: SlashCommandInfo[],
-  ) => Promise<boolean>;
+  handleUserPrompt: HandleUserPrompt;
   runTelePiPickerCommand: (ctx: Context, target: PiSessionContext, command: string) => Promise<void>;
   safeReply: (ctx: Context, text: string, options?: TextOptions, target?: PiSessionContext) => Promise<void>;
   safeEditMessage: (target: PiSessionContext, messageId: number, text: string, options?: TextOptions) => Promise<void>;
@@ -323,7 +319,7 @@ export function createCommandPickerHandlers(deps: {
 
       pendingCommandPickers.delete(activePicker.contextKey);
       await answerCallbackQuerySafely(ctx, { text: `Running ${trimLine(entry.commandText, 32)}` });
-      await handleUserPrompt(ctx, target, entry.commandText);
+      await handleUserPrompt(ctx, target, entry.commandText, undefined, undefined, { allowSteering: false });
       return;
     }
 

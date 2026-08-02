@@ -123,6 +123,7 @@ const mockState = vi.hoisted(() => {
         },
       },
       prompt: vi.fn().mockResolvedValue(undefined),
+      steer: vi.fn().mockResolvedValue(undefined),
       setSessionName: vi.fn(),
       bindExtensions: vi.fn().mockResolvedValue(undefined),
       abort: vi.fn().mockResolvedValue(undefined),
@@ -2087,6 +2088,26 @@ describe("PiSessionService", () => {
     currentSession.prompt.mockRejectedValueOnce(new Error("boom"));
 
     await expect(service.prompt("hello")).rejects.toThrow("Pi session prompt failed: boom");
+  });
+
+  it("steers plain text through the active AgentSession", async () => {
+    const service = await PiSessionService.create(createConfig());
+    const currentSession = mockState.createdSessions[0]?.session;
+
+    await service.steer("focus on the race");
+
+    expect(currentSession.steer).toHaveBeenCalledWith("focus on the race");
+  });
+
+  it("wraps steering failures while preserving their cause", async () => {
+    const service = await PiSessionService.create(createConfig());
+    const currentSession = mockState.createdSessions[0]?.session;
+    const cause = new Error("queue unavailable");
+    currentSession.steer.mockRejectedValueOnce(cause);
+
+    const error = await service.steer("focus on the race").catch((error: unknown) => error);
+
+    expect(error).toMatchObject({ message: "Pi session steering failed: queue unavailable", cause });
   });
 
   it("disposes the active session", async () => {

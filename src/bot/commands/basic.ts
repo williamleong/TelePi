@@ -1,10 +1,9 @@
 import type { Context } from "grammy";
-import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
-
 import { escapeHTML } from "../../format.js";
 import type { PiSessionContext, PiSessionRegistry, PiSessionService } from "../../pi-session.js";
 import { renderFailedText, renderHelpHTML, renderHelpPlain, renderPrefixedError, renderSessionInfoHTML, renderSessionInfoPlain, renderVoiceSupportHTML, renderVoiceSupportPlain } from "../message-rendering.js";
 import type { TextOptions } from "../telegram-transport.js";
+import type { HandleUserPrompt } from "../prompt-handler.js";
 
 export function createBasicCommandHandlers(deps: {
   sessionRegistry: PiSessionRegistry;
@@ -12,12 +11,7 @@ export function createBasicCommandHandlers(deps: {
   getOrCreateSession: (target: PiSessionContext) => Promise<PiSessionService>;
   refreshChatScopedCommands: (target: PiSessionContext, piSession: PiSessionService) => Promise<void>;
   openCommandPicker: (ctx: Context, target: PiSessionContext) => Promise<void>;
-  handleUserPrompt: (
-    ctx: Context,
-    target: PiSessionContext,
-    userText: string,
-    preloadedSlashCommands?: SlashCommandInfo[],
-  ) => Promise<boolean>;
+  handleUserPrompt: HandleUserPrompt;
   getLastPrompt: (target: PiSessionContext) => string | undefined;
   isActivityEnabled: (target: PiSessionContext) => boolean;
   setActivityEnabled: (target: PiSessionContext, enabled: boolean) => void;
@@ -158,7 +152,7 @@ export function createBasicCommandHandlers(deps: {
       return;
     }
 
-    await handleUserPrompt(ctx, target, lastPrompt);
+    await handleUserPrompt(ctx, target, lastPrompt, undefined, undefined, { allowSteering: false });
   };
 
   return {

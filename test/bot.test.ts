@@ -54,7 +54,7 @@ import type {
   PiSessionService,
 } from "../src/pi-session.js";
 import { createBot, registerCommands } from "../src/bot.js";
-import { startPromptInboxPolling } from "../src/bot/prompt-inbox.js";
+import { pollPromptInboxOnce, startPromptInboxPolling } from "../src/bot/prompt-inbox.js";
 import { getAvailableBackends, transcribeAudio } from "../src/voice.js";
 
 type SwitchResult = Awaited<ReturnType<PiSessionService["switchSession"]>>;
@@ -334,6 +334,7 @@ function createMockPiSession(overrides: Partial<PiSessionService> = {}) {
       extensionBindings = bindings;
     }),
     prompt: vi.fn().mockResolvedValue(undefined),
+    steer: vi.fn().mockResolvedValue(undefined),
     setSessionName: vi.fn(),
     getSession: vi.fn().mockReturnValue({
       agent: { waitForIdle: vi.fn().mockResolvedValue(undefined) },
@@ -681,17 +682,17 @@ async function nextTick(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function getNonWorkingSendMessageCalls(api: ReturnType<typeof setupBot>["api"]): any[] {
-  return api.sendMessage.mock.calls.filter((call) => !String(call[1]).includes("Working"));
+function getSendMessageCalls(api: ReturnType<typeof setupBot>["api"]): any[] {
+  return api.sendMessage.mock.calls;
 }
 
 function getReplyMarkupData(api: ReturnType<typeof setupBot>["api"], callIndex = 0): string[] {
-  const markup = getNonWorkingSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
+  const markup = getSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
   return markup?.inline_keyboard?.flat().map((button: any) => button.callback_data) ?? [];
 }
 
 function getReplyMarkupTexts(api: ReturnType<typeof setupBot>["api"], callIndex = 0): string[] {
-  const markup = getNonWorkingSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
+  const markup = getSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
   return markup?.inline_keyboard?.flat().map((button: any) => button.text) ?? [];
 }
 
@@ -699,7 +700,7 @@ function getReplyMarkupButtons(
   api: ReturnType<typeof setupBot>["api"],
   callIndex = 0,
 ): Array<{ text: string; callback_data: string }> {
-  const markup = getNonWorkingSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
+  const markup = getSendMessageCalls(api)[callIndex]?.[2]?.reply_markup;
   return markup?.inline_keyboard?.flat() ?? [];
 }
 
@@ -964,17 +965,12 @@ describe("createBot", () => {
     ].join("\n");
     expect(disabledDelivery).not.toContain("Thinking");
     expect(disabledDelivery).toContain("read");
-    const disabledStatusCallIndex = api.sendMessage.mock.calls.findIndex((call) => String(call[1]).includes("Working"));
     const disabledAssistantCallIndex = api.sendMessage.mock.calls.findIndex(
       (call) => String(call[1]).includes("topic seven answer"),
     );
-    const disabledStatus = await api.sendMessage.mock.results[disabledStatusCallIndex]?.value;
-    const disabledAssistant = await api.sendMessage.mock.results[disabledAssistantCallIndex]?.value;
-    expect(disabledAssistantCallIndex).toBeGreaterThan(disabledStatusCallIndex);
-    expect(disabledAssistant.message_id).toBeGreaterThan(disabledStatus.message_id);
-    expect(api.editMessageText.mock.calls.some(
-      (call) => call[1] === disabledStatus.message_id && String(call[2]).includes("topic seven answer"),
-    )).toBe(false);
+    expect(disabledAssistantCallIndex).toBe(0);
+    expect(JSON.stringify(api.sendMessage.mock.calls[disabledAssistantCallIndex]?.[2]?.reply_markup)).toContain("pi_abort");
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(false);
 
     api.sendMessage.mockClear();
     api.editMessageText.mockClear();
@@ -986,18 +982,17 @@ describe("createBot", () => {
     ].join("\n");
     expect(defaultDelivery).toContain("Thinking");
     expect(defaultDelivery).toContain("topic eight answer");
-    const topicBStatusCallIndex = api.sendMessage.mock.calls.findIndex((call) => String(call[1]).includes("Working"));
     const topicBThinkingCallIndex = api.sendMessage.mock.calls.findIndex((call) => String(call[1]).includes("Thinking"));
     const topicBAssistantCallIndex = api.sendMessage.mock.calls.findIndex(
       (call) => String(call[1]).includes("topic eight answer"),
     );
-    const topicBStatus = await api.sendMessage.mock.results[topicBStatusCallIndex]?.value;
     const topicBThinking = await api.sendMessage.mock.results[topicBThinkingCallIndex]?.value;
     const topicBAssistant = await api.sendMessage.mock.results[topicBAssistantCallIndex]?.value;
-    expect(topicBThinkingCallIndex).toBeGreaterThan(topicBStatusCallIndex);
+    expect(topicBThinkingCallIndex).toBe(0);
     expect(topicBAssistantCallIndex).toBeGreaterThan(topicBThinkingCallIndex);
-    expect(topicBThinking.message_id).toBeGreaterThan(topicBStatus.message_id);
+    expect(JSON.stringify(api.sendMessage.mock.calls[topicBThinkingCallIndex]?.[2]?.reply_markup)).toContain("pi_abort");
     expect(topicBAssistant.message_id).toBeGreaterThan(topicBThinking.message_id);
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(false);
 
     await bot.handleUpdate(topic("/activity on", 7));
     api.sendMessage.mockClear();
@@ -1403,6 +1398,31 @@ describe("createBot", () => {
     expect(failure.api.sendMessage.mock.calls[0]?.[1]).toContain("abort failed");
   });
 
+  it("aborts the active session before it has delivered output", async () => {
+    let resolvePrompt!: () => void;
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        prompt: vi.fn().mockImplementation(
+          () => new Promise<void>((resolve) => {
+            resolvePrompt = resolve;
+          }),
+        ),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "start streaming" } }));
+    await vi.waitFor(() => {
+      expect(pi.service.prompt).toHaveBeenCalledTimes(1);
+    });
+    expect(api.sendMessage).not.toHaveBeenCalled();
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/abort" } }));
+    expect(pi.service.abort).toHaveBeenCalledTimes(1);
+
+    resolvePrompt();
+    await nextTick();
+  });
+
   it("does not create a fresh session for /abort in an untouched context", async () => {
     const { bot, api, registry } = setupBot();
 
@@ -1449,11 +1469,10 @@ describe("createBot", () => {
         },
       }),
     );
-    await vi.waitFor(() => {
-      expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(true);
-    });
-
     const topicSession = registry.getSession(ALLOWED_CHAT_ID, 101)!;
+    await vi.waitFor(() => {
+      expect(topicSession.service.prompt).toHaveBeenCalledTimes(1);
+    });
     topicSession.emitTextDelta("first streamed output");
     await vi.waitFor(() => {
       expect(api.sendMessage.mock.calls.some(
@@ -1465,11 +1484,8 @@ describe("createBot", () => {
     );
     const output = await api.sendMessage.mock.results[outputCallIndex]?.value;
     const outputMessageId = output.message_id;
-    await vi.waitFor(() => {
-      expect(api.editMessageReplyMarkup.mock.calls.some(
-        (call) => call[1] === outputMessageId && JSON.stringify(call[2]).includes("pi_abort"),
-      )).toBe(true);
-    });
+    expect(JSON.stringify(api.sendMessage.mock.calls[outputCallIndex]?.[2]?.reply_markup)).toContain("pi_abort");
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(false);
 
     await bot.handleUpdate(
       createCallbackUpdate("pi_abort", {
@@ -1725,6 +1741,250 @@ describe("createBot", () => {
       "/workspace/topic-one",
     );
     expect(registry.getSession(ALLOWED_CHAT_ID)?.service.switchSession).not.toHaveBeenCalled();
+  });
+
+  it("steers same-topic streaming text without creating a second Telegram prompt flow", async () => {
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        isStreaming: vi.fn().mockReturnValue(true),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "focus on the failing test" } }));
+
+    expect(pi.service.steer).toHaveBeenCalledWith("focus on the failing test");
+    expect(pi.service.prompt).not.toHaveBeenCalled();
+    expect(pi.service.subscribe).not.toHaveBeenCalled();
+    expect(api.sendChatAction).not.toHaveBeenCalled();
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Still working"))).toBe(false);
+  });
+
+  it("keeps streaming sessions isolated by forum topic", async () => {
+    const topicAKey = makeContextKey(ALLOWED_CHAT_ID, 101);
+    const topicBKey = makeContextKey(ALLOWED_CHAT_ID, 202);
+    const { bot, registry } = setupBot({
+      perContextSessionOverrides: {
+        [topicAKey]: { isStreaming: vi.fn().mockReturnValue(true) },
+        [topicBKey]: { isStreaming: vi.fn().mockReturnValue(false) },
+      },
+    });
+    await registry.registry.getOrCreate({ chatId: ALLOWED_CHAT_ID, messageThreadId: 101 });
+
+    await bot.handleUpdate(createTestUpdate({
+      message: {
+        text: "steer topic A",
+        chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+        message_thread_id: 101,
+      },
+    }));
+    await bot.handleUpdate(createTestUpdate({
+      message: {
+        text: "prompt topic B",
+        chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+        message_thread_id: 202,
+      },
+    }));
+    await nextTick();
+
+    expect(registry.getSession(ALLOWED_CHAT_ID, 101)?.service.steer).toHaveBeenCalledWith("steer topic A");
+    expect(registry.getSession(ALLOWED_CHAT_ID, 202)?.service.steer).not.toHaveBeenCalled();
+    expect(registry.getSession(ALLOWED_CHAT_ID, 202)?.service.prompt).toHaveBeenCalledWith("prompt topic B");
+  });
+
+  it("steers a second same-topic message through the original deferred prompt flow", async () => {
+    let resolvePrompt!: () => void;
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        prompt: vi.fn().mockImplementation(
+          () => new Promise<void>((resolve) => {
+            resolvePrompt = resolve;
+          }),
+        ),
+        isStreaming: vi.fn().mockReturnValueOnce(false).mockReturnValue(true),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "start original prompt" } }));
+    await vi.waitFor(() => {
+      expect(pi.service.prompt).toHaveBeenCalledTimes(1);
+      expect(pi.service.subscribe).toHaveBeenCalledTimes(1);
+    });
+    pi.emitTextDelta("original chronological output");
+    await vi.waitFor(() => {
+      expect(api.sendMessage.mock.calls.some(
+        (call) => String(call[1]).includes("original chronological output"),
+      )).toBe(true);
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "steer the original prompt" } }));
+
+    expect(pi.service.steer).toHaveBeenCalledWith("steer the original prompt");
+    expect(pi.service.prompt).toHaveBeenCalledTimes(1);
+    expect(pi.service.subscribe).toHaveBeenCalledTimes(1);
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Still working"))).toBe(false);
+
+    pi.emitTextDelta(" after steering");
+    resolvePrompt();
+    await vi.waitFor(() => {
+      expect(api.editMessageText.mock.calls.some(
+        (call) => String(call[2]).includes("original chronological output after steering"),
+      )).toBe(true);
+    });
+  });
+
+  it("consumes extension input before considering active-stream steering", async () => {
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        isStreaming: vi.fn().mockReturnValueOnce(false).mockReturnValue(true),
+        listSlashCommands: vi.fn().mockResolvedValue([
+          { name: "ask", description: "Ask for input", source: "extension", path: "/ext/ask.ts" },
+        ]),
+      },
+    });
+    const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
+    promptMock.mockImplementation(async () => {
+      const value = await pi.getExtensionBindings()?.uiContext?.input("Name", "Your name");
+      pi.emitTextDelta(`hello ${value}`);
+      pi.emitAgentEnd();
+    });
+
+    const pending = bot.handleUpdate(createTestUpdate({ message: { text: "/ask" } }));
+    await nextTick();
+    await bot.handleUpdate(createTestUpdate({ message: { text: "Bene" } }));
+    await pending;
+
+    expect(pi.service.steer).not.toHaveBeenCalled();
+    expect(hasSentOrEditedText(api, "hello Bene")).toBe(true);
+  });
+
+  it("does not steer non-text updates or the busy prompt inbox", async () => {
+    vi.mocked(startPromptInboxPolling).mockClear();
+    const { bot, pi, api, registry } = setupBot({
+      configOverrides: { promptInboxDir: "/tmp/telepi-inbox" },
+      piSessionOverrides: {
+        isStreaming: vi.fn().mockReturnValue(true),
+        listSlashCommands: vi.fn().mockResolvedValue([
+          { name: "compact", description: "Compact", source: "extension", path: "/ext/compact.ts" },
+        ]),
+      },
+      perContextSessionOverrides: {
+        [makeContextKey(ALLOWED_USER_ID)]: { isStreaming: vi.fn().mockReturnValue(true) },
+      },
+    });
+    await registry.registry.getOrCreate({ chatId: ALLOWED_USER_ID });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/compact" } }));
+    await bot.handleUpdate(createPhotoUpdate());
+    await bot.handleUpdate(createDocumentUpdate());
+    await bot.handleUpdate(createVoiceUpdate());
+
+    const inboxOptions = vi.mocked(startPromptInboxPolling).mock.calls[0]?.[0];
+    expect(inboxOptions?.isBusy(inboxOptions.target)).toBe(true);
+    expect(pi.service.steer).not.toHaveBeenCalled();
+    expect(api.getFile).not.toHaveBeenCalled();
+  });
+
+  it("moves an inbox file to failed when a stream starts after its idle poll check", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "telepi-inbox-race-"));
+    const promptPath = path.join(tempDir, "race.txt");
+    const isStreaming = vi.fn().mockReturnValueOnce(false).mockReturnValue(true);
+    vi.mocked(startPromptInboxPolling).mockClear();
+    const { registry } = setupBot({
+      configOverrides: { promptInboxDir: tempDir },
+      perContextSessionOverrides: {
+        [makeContextKey(ALLOWED_USER_ID)]: { isStreaming },
+      },
+    });
+    await registry.registry.getOrCreate({ chatId: ALLOWED_USER_ID });
+    const inboxSession = registry.getSession(ALLOWED_USER_ID)!.service;
+    const inboxOptions = vi.mocked(startPromptInboxPolling).mock.calls[0]?.[0];
+    writeFileSync(promptPath, "do not steer this inbox prompt");
+    vi.mocked(readFile).mockResolvedValueOnce("do not steer this inbox prompt" as never);
+
+    try {
+      await expect(pollPromptInboxOnce({
+        ...inboxOptions!,
+        inboxDir: tempDir,
+      })).resolves.toBe("failed");
+
+      expect(inboxSession.steer).not.toHaveBeenCalled();
+      expect(inboxSession.prompt).not.toHaveBeenCalled();
+      expect(existsSync(promptPath)).toBe(false);
+      expect(existsSync(`${promptPath}.failed`)).toBe(true);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an audio transcript busy when streaming starts after its media precheck", async () => {
+    let streamStarted = false;
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        isStreaming: vi.fn(() => streamStarted),
+      },
+    });
+    vi.mocked(transcribeAudio).mockImplementationOnce(async () => {
+      streamStarted = true;
+      return {
+        text: "transcribed text",
+        backend: "openai",
+        durationMs: 500,
+      };
+    });
+
+    await bot.handleUpdate(createVoiceUpdate());
+
+    expect(pi.service.steer).not.toHaveBeenCalled();
+    expect(pi.service.prompt).not.toHaveBeenCalled();
+    expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Still working on previous message...");
+  });
+
+  it("keeps a native-menu command busy when streaming starts after its callback precheck", async () => {
+    let streamStarted = false;
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        isStreaming: vi.fn(() => streamStarted),
+        listSlashCommands: vi.fn().mockResolvedValue([
+          makeTelepiBareNativeMenuSlashCommand("deploy", [
+            { id: "status", label: "Status", commandText: "/deploy status" },
+          ]),
+        ]),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/deploy" } }));
+    const callbackData = getReplyMarkupData(api)[0]!;
+    let acknowledge!: () => void;
+    api.answerCallbackQuery.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    }));
+
+    const pendingCallback = bot.handleUpdate(createCallbackUpdate(callbackData));
+    await nextTick();
+    streamStarted = true;
+    acknowledge();
+    await pendingCallback;
+
+    expect(pi.service.steer).not.toHaveBeenCalled();
+    expect(pi.service.prompt).not.toHaveBeenCalled();
+    expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Still working on previous message...");
+  });
+
+  it("reports steering rejection once without disturbing the active Pi stream", async () => {
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        isStreaming: vi.fn().mockReturnValue(true),
+        steer: vi.fn().mockRejectedValue(new Error("queue unavailable")),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "focus on the failing test" } }));
+
+    expect(pi.service.steer).toHaveBeenCalledWith("focus on the failing test");
+    expect(pi.service.prompt).not.toHaveBeenCalled();
+    expect(pi.service.abort).not.toHaveBeenCalled();
+    expect(api.sendMessage.mock.calls.filter((call) => String(call[1]).includes("Steering failed"))).toHaveLength(1);
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("queue unavailable"))).toBe(true);
   });
 
   it("allows independent topics to process prompts concurrently", async () => {
@@ -2703,21 +2963,15 @@ describe("createBot", () => {
       expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Hello world"))).toBe(true);
     });
 
-    const statusCallIndex = api.sendMessage.mock.calls.findIndex((call) => String(call[1]).includes("Working"));
     const assistantCallIndex = api.sendMessage.mock.calls.findIndex((call) => String(call[1]).includes("Hello world"));
-    const status = await api.sendMessage.mock.results[statusCallIndex]?.value;
-    const assistant = await api.sendMessage.mock.results[assistantCallIndex]?.value;
 
     expect(pi.service.subscribe).toHaveBeenCalledTimes(1);
     expect(pi.service.prompt).toHaveBeenCalledWith("continue please");
     expect(api.sendChatAction).toHaveBeenCalled();
-    expect(statusCallIndex).toBeGreaterThanOrEqual(0);
-    expect(assistantCallIndex).toBeGreaterThan(statusCallIndex);
-    expect(assistant.message_id).toBeGreaterThan(status.message_id);
+    expect(assistantCallIndex).toBe(0);
+    expect(JSON.stringify(api.sendMessage.mock.calls[assistantCallIndex]?.[2]?.reply_markup)).toContain("pi_abort");
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(false);
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Running:"))).toBe(true);
-    expect(api.editMessageText.mock.calls.some(
-      (call) => call[1] === status.message_id && String(call[2]).includes("Hello world"),
-    )).toBe(false);
   });
 
   it("finalizes rich Markdown assistant responses through Telegram rich messages", async () => {
@@ -2741,15 +2995,12 @@ describe("createBot", () => {
       expect(api.sendRichMessage).toHaveBeenCalledTimes(1);
     });
 
-    const status = await api.sendMessage.mock.results[0]?.value;
     const assistant = await api.sendRichMessage.mock.results[0]?.value;
-    expect(status.text).toContain("Working");
-    expect(assistant.message_id).toBeGreaterThan(status.message_id);
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(false);
+    expect(assistant.message_id).toBe(1);
+    expect(JSON.stringify(api.sendRichMessage.mock.calls[0]?.[2]?.reply_markup)).toContain("pi_abort");
     expect(api.sendRichMessage.mock.calls[0]?.[1].markdown).toContain("# Report");
     expect(api.sendRichMessage.mock.calls[0]?.[1].markdown).toContain("| Metric | Value |");
-    expect(api.editMessageText.mock.calls.some(
-      (call) => call[1] === status.message_id && call[2]?.markdown?.includes("# Report"),
-    )).toBe(false);
   });
 
   it("bridges discovered Pi slash commands into the prompt flow", async () => {
@@ -4449,16 +4700,13 @@ describe("createBot", () => {
       expect(delivery).not.toContain("hidden thinking");
 
       if (toolVerbosity === "summary") {
-        const statusCallIndex = flow.api.sendMessage.mock.calls.findIndex((call) => String(call[1]).includes("Working"));
-        const status = await flow.api.sendMessage.mock.results[statusCallIndex]?.value;
         const sentMessages = await Promise.all(flow.api.sendMessage.mock.results.map((result) => result.value));
-        const outputMessages = sentMessages.filter((message) => message?.message_id !== status.message_id);
         const messageTexts = new Map<number, string>();
-        for (const message of outputMessages) {
+        for (const message of sentMessages) {
           messageTexts.set(message.message_id, String(message.text ?? ""));
         }
         for (const call of flow.api.editMessageText.mock.calls) {
-          if (typeof call[1] === "number" && call[1] !== status.message_id) {
+          if (typeof call[1] === "number") {
             messageTexts.set(call[1], String(call[2]));
           }
         }
@@ -4467,8 +4715,9 @@ describe("createBot", () => {
         const summaryMessage = [...messageTexts.entries()].find(([, text]) => text.includes(summaryText));
         expect(summaryMessage).toBeDefined();
         expect(summaryMessage?.[1]).toContain("Final answer");
-        expect(summaryMessage?.[0]).toBeGreaterThan(status.message_id);
-        expect(messageTexts.get(status.message_id) ?? "").not.toContain(summaryText);
+        expect(summaryMessage?.[0]).toBeGreaterThanOrEqual(1);
+        expect(JSON.stringify(flow.api.sendMessage.mock.calls[0]?.[2]?.reply_markup)).toContain("pi_abort");
+        expect(flow.api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Working"))).toBe(false);
         return;
       }
 
@@ -4497,7 +4746,7 @@ describe("createBot", () => {
       throw new Error("prompt failed");
     });
     await failure.bot.handleUpdate(createTestUpdate({ message: { text: "break" } }));
-    expect(failure.api.editMessageText.mock.calls.some((call) => String(call[2]).includes("⚠️ prompt failed"))).toBe(
+    expect(failure.api.sendMessage.mock.calls.some((call) => String(call[1]).includes("⚠️ prompt failed"))).toBe(
       true,
     );
 
@@ -4508,7 +4757,7 @@ describe("createBot", () => {
       throw new Error("Abort requested");
     });
     await aborted.bot.handleUpdate(createTestUpdate({ message: { text: "stop" } }));
-    expect(aborted.api.editMessageText.mock.calls.some((call) => String(call[2]).includes("⏹ Aborted"))).toBe(
+    expect(aborted.api.sendMessage.mock.calls.some((call) => String(call[1]).includes("⏹ Aborted"))).toBe(
       true,
     );
   });
@@ -4579,7 +4828,7 @@ describe("createBot", () => {
     ], undefined);
   });
 
-  it("blocks commands when piSession.isStreaming() returns true", async () => {
+  it("blocks control commands but steers ordinary text when piSession is streaming", async () => {
     const streaming = setupBot({
       piSessionOverrides: {
         isStreaming: vi.fn().mockReturnValue(true),
@@ -4606,9 +4855,12 @@ describe("createBot", () => {
     await streaming.bot.handleUpdate(createTestUpdate({ message: { text: "/label saved" } }));
     expect(streaming.api.sendMessage.mock.calls[5]?.[1]).toContain("Cannot label entries while a prompt is running.");
 
-    // text messages should be blocked
+    // Plain text steers the existing Pi run instead of creating a busy reply.
     await streaming.bot.handleUpdate(createTestUpdate({ message: { text: "hello there" } }));
-    expect(streaming.api.sendMessage.mock.calls[6]?.[1]).toContain("Still working on previous message...");
+    expect(streaming.pi.service.steer).toHaveBeenCalledWith("hello there");
+    expect(streaming.api.sendMessage.mock.calls.some(
+      (call) => String(call[1]).includes("Still working on previous message..."),
+    )).toBe(false);
 
     await streaming.bot.handleUpdate(createCallbackUpdate("tree_nav_branch111"));
     expect(streaming.api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", {
@@ -4616,7 +4868,7 @@ describe("createBot", () => {
     });
   });
 
-  it("sends '✅ Done' when agent ends with no text output", async () => {
+  it("sends no status message when an agent ends with no text output", async () => {
     const { bot, pi, api } = setupBot();
     const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
     promptMock.mockImplementation(async () => {
@@ -4626,7 +4878,8 @@ describe("createBot", () => {
 
     await bot.handleUpdate(createTestUpdate({ message: { text: "do something silent" } }));
 
-    expect(hasSentOrEditedText(api, "✅ Done")).toBe(true);
+    expect(api.sendMessage).not.toHaveBeenCalled();
+    expect(api.editMessageText).not.toHaveBeenCalled();
   });
 
   it("handles in-memory handback (no sessionFile)", async () => {

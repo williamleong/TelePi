@@ -35,6 +35,7 @@ describe("bot chat state", () => {
 
     state.beginProcessing(root, "hello");
     expect(state.isLocallyBusy(root)).toBe(true);
+    expect(state.isSteeringBlocked(root)).toBe(false);
     expect(state.getLastPrompt(root)).toBe("hello");
     expect(state.isLocallyBusy(topic)).toBe(false);
     expect(state.getLastPrompt(topic)).toBeUndefined();
@@ -44,13 +45,17 @@ describe("bot chat state", () => {
 
     state.beginSwitching(topic);
     expect(state.isLocallyBusy(topic)).toBe(true);
+    expect(state.isSteeringBlocked(topic)).toBe(true);
     state.endSwitching(topic);
     expect(state.isLocallyBusy(topic)).toBe(false);
+    expect(state.isSteeringBlocked(topic)).toBe(false);
 
     state.beginTranscribing(topic);
     expect(state.isLocallyBusy(topic)).toBe(true);
+    expect(state.isSteeringBlocked(topic)).toBe(true);
     state.endTranscribing(topic);
     expect(state.isLocallyBusy(topic)).toBe(false);
+    expect(state.isSteeringBlocked(topic)).toBe(false);
 
     state.clearPromptMemory(root);
     expect(state.getLastPrompt(root)).toBeUndefined();

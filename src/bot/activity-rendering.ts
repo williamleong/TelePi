@@ -105,7 +105,7 @@ export function renderActivityTranscript(transcript: ActivityTranscript): Render
   };
 
   const appendBlock = (block: ActivityBlock): boolean => {
-    const separator = current ? "\n\n" : "";
+    const separator = current ? "\n" : "";
     const next = {
       html: `${current?.html ?? ""}${separator}${block.html}`,
       fallback: `${current?.fallback ?? ""}${separator}${block.fallback}`,
@@ -153,14 +153,15 @@ function appendThinking(
   appendBlock: (block: ActivityBlock) => boolean,
   flush: () => void,
 ): void {
-  const completeBlock = renderThinkingBlock(text, false);
+  const normalizedText = text.trimEnd();
+  const completeBlock = renderThinkingBlock(normalizedText, false);
   if (fits(completeBlock)) {
     appendCompleteBlock(completeBlock, appendBlock, flush);
     return;
   }
 
   flush();
-  const characters = Array.from(text);
+  const characters = Array.from(normalizedText);
   let offset = 0;
   let continued = false;
 
@@ -197,8 +198,8 @@ function largestFittingThinkingPrefix(
 function renderThinkingBlock(text: string, continued: boolean): ActivityBlock {
   const header = continued ? "🧠 Thinking (continued)" : "🧠 Thinking";
   return {
-    html: `<b>${header}</b>\n${escapeHTML(text)}`,
-    fallback: `${header}\n${text}`,
+    html: text ? `${header}\n${escapeHTML(text)}` : header,
+    fallback: text ? `${header}\n${text}` : header,
   };
 }
 

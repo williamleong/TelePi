@@ -78,7 +78,7 @@ TelePi gives Telegram access to a coding agent, so it is designed to stay privat
 - **Helpful recovery commands**: `/help` for quick usage guidance and `/retry` to resend the last prompt in the current chat/topic
 - **Extension dialog support**: Pi extension commands can ask for Telegram-native selects, confirms, and text input mid-command
 - **Native Telegram UX**: Topic-safe inline keyboards, typing indicators, HTML-formatted responses, friendly user-facing errors, auto-retry on rate limits
-- **Chronological prompt streaming**: Keep a status-only working message, then append thinking, tool activity, and assistant segments in Pi event order
+- **Chronological prompt streaming**: Use Telegram's typing indicator before output, then append thinking, tool activity, and assistant segments in Pi event order
 - **Security**: Telegram user allowlist, workspace-scoped tools, Docker support
 
 ## Full setup details
@@ -235,7 +235,7 @@ Any non-TelePi slash command that matches the active Pi session's discovered com
 
 Activity details are on by default and scoped independently per chat or forum topic. They reset to on when TelePi restarts. While a prompt runs, thinking and deterministic compact tool rows are appended as chronological activity segments alongside assistant segments; models and providers may emit no thinking. Foreground Agent rows also edit in place with the subagent's compact current activity, such as `reading…` or `running command…`, and settle to `Done` or `Error`. Use `/activity off` to hide thinking/tool activity and restore the existing `TOOL_VERBOSITY` presentation, or `/activity on` to enable it again.
 
-Each prompt starts with one status-only `⏳ Working…` message. Assistant text is never written into that message: every change of output kind seals the current segment and appends the next activity or `💬 Assistant` segment below it, while adjacent events of the same kind continue in the open message (with Telegram-sized continuation chunks when needed). One movable `⏹ Abort` button starts on the status message and follows the newest output message throughout the run. Telegram's native `typing` indicator starts immediately, refreshes every 4.5 seconds, and remains active until the prompt succeeds, fails, is aborted, or cannot activate.
+Typing is the pre-output progress signal: it starts immediately, refreshes every 4.5 seconds, and remains active until the prompt succeeds, fails, is aborted, or cannot activate. `/abort` works before any output exists; once the first activity or assistant output is sent, a single movable `⏹ Abort` button follows the newest output message. Output changes kind by sealing the current segment and appending the next activity or assistant segment, while adjacent events of the same kind continue in the open message (with Telegram-sized continuation chunks when needed). Thinking is rendered with the compact plain `🧠 Thinking` heading, and a tool row follows it after one newline. Successful completion adds no status message. Ordinary follow-on text during the same active run steers Pi; media and commands are not steering inputs.
 
 ## External Prompt Inbox
 

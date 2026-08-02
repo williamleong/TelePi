@@ -614,6 +614,14 @@ export async function promptSession(session: AgentSession, text: string, images?
   }
 }
 
+export async function steerSession(session: AgentSession, text: string): Promise<void> {
+  try {
+    await session.steer(text);
+  } catch (error) {
+    throw wrapError("Pi session steering failed", error);
+  }
+}
+
 export class PiSessionService {
   private handle?: PiSessionHandle;
   private currentWorkspace: string;
@@ -692,6 +700,10 @@ export class PiSessionService {
 
   async prompt(text: string, images?: ImageContent[]): Promise<void> {
     await promptSession(this.getSession(), text, images);
+  }
+
+  async steer(text: string): Promise<void> {
+    await steerSession(this.getSession(), text);
   }
 
   setSessionName(name: string): void {
