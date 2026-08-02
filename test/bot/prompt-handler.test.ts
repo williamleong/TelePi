@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 
 import { createPromptHandler } from "../../src/bot/prompt-handler.js";
 import type { PiSessionCallbacks } from "../../src/pi-session.js";
@@ -56,14 +57,6 @@ function hasAbortKeyboard(replyMarkup: unknown): boolean {
   return String(JSON.stringify(replyMarkup)).includes("pi_abort");
 }
 
-function createExtensionDialogs() {
-  return {
-    openSelect: vi.fn().mockResolvedValue(undefined),
-    openConfirm: vi.fn().mockResolvedValue(false),
-    openInput: vi.fn().mockResolvedValue(undefined),
-  };
-}
-
 function createPromptHarness(options: {
   activityEnabled?: boolean;
   toolVerbosity?: "none" | "summary" | "errors-only" | "all";
@@ -72,12 +65,14 @@ function createPromptHarness(options: {
   onPrompt?: (callbacks: PiSessionCallbacks) => void | Promise<void>;
   promptError?: Error;
   bindExtensionsError?: Error;
-  onBindExtensions?: () => Promise<void> | void;
+  onBindExtensions?: (ui: ExtensionUIContext) => Promise<void> | void;
+  onOpenDialog?: (method: "select" | "confirm" | "input") => Promise<void> | void;
   subscribeError?: Error;
   ensureActiveSession?: () => Promise<unknown>;
   onSend?: (text: string, messageId: number) => Promise<void> | void;
   onEdit?: (text: string, messageId: number) => Promise<void> | void;
   onMarkup?: (messageId: number, hasAbort: boolean) => Promise<void> | void;
+  onDelete?: (messageId: number) => Promise<void> | void;
   isBusy?: (target: { chatId: number }) => boolean;
   taskRunnerResult?: "started" | "busy";
   taskRunnerResults?: Array<"started" | "busy">;
@@ -88,6 +83,7 @@ function createPromptHarness(options: {
   const trackCallbackMessages: number[] = [];
   const operationWaiters = new Set<() => void>();
   let callbacks: PiSessionCallbacks | undefined;
+  let uiContext: ExtensionUIContext | undefined;
   let nextMessageId = 0;
   let taskPromise: Promise<void> | undefined;
   let taskStartCount = 0;
@@ -131,12 +127,28 @@ function createPromptHarness(options: {
     });
   };
 
+  const extensionDialogs = {
+    openSelect: vi.fn(async () => {
+      await options.onOpenDialog?.("select");
+      return undefined;
+    }),
+    openConfirm: vi.fn(async () => {
+      await options.onOpenDialog?.("confirm");
+      return false;
+    }),
+    openInput: vi.fn(async () => {
+      await options.onOpenDialog?.("input");
+      return undefined;
+    }),
+  };
+
   const fakePiSession = {
-    bindExtensions: vi.fn(async () => {
+    bindExtensions: vi.fn(async (bindings) => {
       if (options.bindExtensionsError) {
         throw options.bindExtensionsError;
       }
-      await options.onBindExtensions?.();
+      uiContext = bindings.uiContext;
+      await options.onBindExtensions?.(uiContext);
     }),
     subscribe(nextCallbacks: PiSessionCallbacks) {
       if (options.subscribeError) {
@@ -200,6 +212,7 @@ function createPromptHarness(options: {
       },
       async deleteMessage(_chatId: number, messageId: number) {
         record({ kind: "delete", messageId });
+        await options.onDelete?.(messageId);
         return true;
       },
   };
@@ -227,7 +240,7 @@ function createPromptHarness(options: {
     ensureActiveSession: vi.fn(options.ensureActiveSession ?? (async () => fakePiSession)),
     syncChatScopedCommands: vi.fn(),
     refreshChatScopedCommands: vi.fn(),
-    extensionDialogs: createExtensionDialogs(),
+    extensionDialogs,
     trackCallbackMessage: (_target, messageId) => {
       trackCallbackMessages.push(messageId);
     },
@@ -237,6 +250,7 @@ function createPromptHarness(options: {
 
   return {
     callbacks: () => callbacks,
+    ui: () => uiContext,
     markupAttempts,
     operations,
     renameForumTopicToSessionName,
@@ -853,7 +867,7 @@ describe("prompt handler", () => {
     [false, "summary"],
     [false, "errors-only"],
   ] as const)(
-    "does not render ask_user as tool activity with activity=%s and verbosity=%s",
+    "removes Working without rendering ask_user activity with activity=%s and verbosity=%s",
     async (activityEnabled, toolVerbosity) => {
       const harness = createPromptHarness({
         activityEnabled,
@@ -866,16 +880,264 @@ describe("prompt handler", () => {
       });
 
       await expect(harness.run()).resolves.toBe(true);
+      expect(harness.operations).toContainEqual(expect.objectContaining({
+        kind: "send",
+        messageId: 1,
+        text: expect.stringMatching(/Working/i),
+        hasAbort: true,
+      }));
+      expect(harness.operations).toContainEqual({ kind: "delete", messageId: 1 });
       expect(harness.operations.filter(
-        (operation) => operation.kind === "send"
-          || operation.kind === "edit"
-          || operation.kind === "markup",
+        (operation) => (operation.kind === "send" || operation.kind === "edit")
+          && /ask[ _]user/i.test(operation.text),
       )).toEqual([]);
-      expect(harness.trackCallbackMessages).toEqual([]);
     },
   );
 
-  it("resumes normal delivery and Abort ownership after ask_user resolves", async () => {
+  it.each(["select", "confirm", "input"] as const)(
+    "deletes Working before opening ask_user %s dialog",
+    async (method) => {
+      let harness!: ReturnType<typeof createPromptHarness>;
+      harness = createPromptHarness({
+        onOpenDialog: (openedMethod) => {
+          expect(openedMethod).toBe(method);
+          expect(harness.operations).toContainEqual({ kind: "delete", messageId: 1 });
+        },
+        onPrompt: async (callbacks) => {
+          callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+          if (method === "select") {
+            await harness.ui()!.select("Choose one", ["Yes", "No"]);
+          } else if (method === "confirm") {
+            await harness.ui()!.confirm("Choose one", "Continue?");
+          } else {
+            await harness.ui()!.input("Choose one", "Type a response");
+          }
+          callbacks.onToolEnd("question-1", false);
+        },
+      });
+
+      await expect(harness.run()).resolves.toBe(true);
+    },
+  );
+
+  it("waits for the in-flight Working deletion before opening ask_user", async () => {
+    const deleteRelease = deferred();
+    let deleteCompleted = false;
+    let dialogOpenedBeforeDelete = false;
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onDelete: async () => {
+        await deleteRelease.promise;
+        deleteCompleted = true;
+      },
+      onOpenDialog: () => {
+        dialogOpenedBeforeDelete = !deleteCompleted;
+      },
+      onPrompt: async (callbacks) => {
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        const select = harness.ui()!.select("Choose one", ["Yes", "No"]);
+        await harness.waitForOperation((operation) => operation.kind === "delete" && operation.messageId === 1);
+        deleteRelease.resolve();
+        await select;
+        callbacks.onToolEnd("question-1", false);
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(dialogOpenedBeforeDelete).toBe(false);
+  });
+
+  it("keeps a Working message as the failure target when dialog deletion rejects", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onDelete: () => Promise.reject(new Error("delete rejected")),
+      onPrompt: async (callbacks) => {
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        await harness.ui()!.select("Choose one", ["Yes", "No"]);
+        callbacks.onToolEnd("question-1", false);
+        throw new Error("prompt failed");
+      },
+    });
+
+    try {
+      await expect(harness.run()).resolves.toBe(false);
+      expect(harness.operations).toContainEqual(expect.objectContaining({
+        kind: "edit",
+        messageId: 1,
+        text: "⚠️ prompt failed",
+      }));
+      expect(harness.operations.filter(
+        (operation) => operation.kind === "send" && operation.text === "⚠️ prompt failed",
+      )).toEqual([]);
+      expect(harness.operations).toContainEqual({ kind: "markup", messageId: 1, hasAbort: false });
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("restores abort ownership when ask_user deletion fails and Working is adopted", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      activityEnabled: false,
+      toolVerbosity: "all",
+      onDelete: () => Promise.reject(new Error("delete rejected")),
+      onPrompt: async (callbacks) => {
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        await harness.ui()!.select("Choose one", ["Yes", "No"]);
+        callbacks.onToolEnd("question-1", false);
+
+        callbacks.onToolStart("bash", "tool-1", {});
+        await harness.waitForOperation(
+          (operation) => operation.kind === "edit"
+            && operation.messageId === 1
+            && operation.text.includes("Running:"),
+        );
+
+        callbacks.onToolStart("grep", "tool-2", {});
+        await harness.waitForOperation(
+          (operation) => operation.kind === "send"
+            && operation.messageId === 2
+            && operation.text.includes("Running:"),
+        );
+      },
+    });
+
+    try {
+      await expect(harness.run()).resolves.toBe(true);
+      expect(harness.operations).toContainEqual(expect.objectContaining({
+        kind: "edit",
+        messageId: 1,
+        text: expect.stringContaining("Running:"),
+        hasAbort: true,
+      }));
+      expect(harness.operations).toContainEqual(expect.objectContaining({
+        kind: "send",
+        messageId: 2,
+        text: expect.stringContaining("Running:"),
+        hasAbort: false,
+      }));
+      expect(harness.markupAttempts).toContainEqual({ messageId: 2, hasAbort: true });
+      expect(harness.markupAttempts).toContainEqual({ messageId: 1, hasAbort: false });
+      expect(harness.trackCallbackMessages).toEqual([1, 2]);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("neutralizes Abort on adopted Working content before opening ask_user", async () => {
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onPrompt: async (callbacks) => {
+        callbacks.onThinkingDelta({ blockKey: "thinking-1", delta: "already visible" });
+        await harness.waitForOperation(
+          (operation) => operation.kind === "edit" && operation.messageId === 1 && operation.text.includes("already visible"),
+        );
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        await harness.ui()!.select("Choose one", ["Yes", "No"]);
+        callbacks.onToolEnd("question-1", false);
+        callbacks.onTextDelta("later answer");
+        await harness.waitForOperation(
+          (operation) => operation.kind === "send" && operation.messageId === 2 && operation.hasAbort,
+        );
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(harness.operations).not.toContainEqual({ kind: "delete", messageId: 1 });
+    expect(harness.operations).toContainEqual({ kind: "markup", messageId: 1, hasAbort: false });
+  });
+
+  it("queues ask_user handoff behind in-flight Working adoption", async () => {
+    const adoptionRelease = deferred();
+    const adoptionStarted = deferred();
+    let adoptionCompleted = false;
+    let dialogOpenedBeforeAdoption = false;
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onEdit: async (text, messageId) => {
+        if (messageId === 1 && text.includes("queued activity")) {
+          adoptionStarted.resolve();
+          await adoptionRelease.promise;
+          adoptionCompleted = true;
+        }
+      },
+      onOpenDialog: () => {
+        dialogOpenedBeforeAdoption = !adoptionCompleted;
+      },
+      onPrompt: async (callbacks) => {
+        callbacks.onThinkingDelta({ blockKey: "thinking-1", delta: "queued activity" });
+        await adoptionStarted.promise;
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        const select = harness.ui()!.select("Choose one", ["Yes", "No"]);
+        adoptionRelease.resolve();
+        await select;
+        callbacks.onToolEnd("question-1", false);
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(dialogOpenedBeforeAdoption).toBe(false);
+    expect(harness.operations).toContainEqual({ kind: "markup", messageId: 1, hasAbort: false });
+  });
+
+  it("keeps Abort absent while ask_user is pending and restores it for later output", async () => {
+    let abortAttachedDuringDialog = false;
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onPrompt: async (callbacks) => {
+        callbacks.onThinkingDelta({ blockKey: "thinking-1", delta: "visible activity" });
+        await harness.waitForOperation(
+          (operation) => operation.kind === "edit" && operation.messageId === 1 && operation.text.includes("visible activity"),
+        );
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        await harness.ui()!.select("Choose one", ["Yes", "No"]);
+        callbacks.onTextDelta("during dialog");
+        await harness.waitForOperation(
+          (operation) => operation.kind === "send" && operation.messageId === 2 && operation.text.includes("during dialog"),
+        );
+        abortAttachedDuringDialog = harness.markupAttempts.some(
+          (attempt) => attempt.messageId === 2 && attempt.hasAbort,
+        );
+        callbacks.onToolEnd("question-1", false);
+        callbacks.onTextDelta(" later output");
+        await harness.waitForOperation(
+          (operation) => operation.kind === "markup" && operation.messageId === 2 && operation.hasAbort,
+        );
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(harness.operations).toContainEqual({ kind: "markup", messageId: 1, hasAbort: false });
+    expect(abortAttachedDuringDialog).toBe(false);
+    expect(harness.markupAttempts).toContainEqual({ messageId: 2, hasAbort: true });
+  });
+
+  it("does not attach Abort to legacy output while ask_user is pending", async () => {
+    let legacyOutputHasAbort = true;
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      activityEnabled: false,
+      toolVerbosity: "all",
+      onPrompt: async (callbacks) => {
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        await harness.ui()!.select("Choose one", ["Yes", "No"]);
+        callbacks.onToolStart("bash", "tool-1", {});
+        const legacyOutput = await harness.waitForOperation(
+          (operation) => operation.kind === "send" && operation.text.includes("Running:"),
+        );
+        legacyOutputHasAbort = legacyOutput.hasAbort;
+        callbacks.onToolEnd("question-1", false);
+        callbacks.onToolEnd("tool-1", false);
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(legacyOutputHasAbort).toBe(false);
+  });
+
+  it("sends later assistant output as a newer Abort owner after ask_user resolves", async () => {
     const harness = createPromptHarness({
       activityEnabled: true,
       toolVerbosity: "all",
@@ -891,13 +1153,16 @@ describe("prompt handler", () => {
     const sends = harness.operations.filter(
       (operation): operation is Extract<TelegramOperation, { kind: "send" }> => operation.kind === "send",
     );
-    expect(sends).toHaveLength(1);
-    expect(sends[0]).toMatchObject({ text: expect.stringContaining("Answer accepted"), hasAbort: true });
-    expect(sends[0].text).not.toMatch(/ask[ _]user/i);
-    expect(harness.trackCallbackMessages).toEqual([sends[0].messageId]);
+    expect(sends).toEqual(expect.arrayContaining([
+      expect.objectContaining({ messageId: 1, text: expect.stringMatching(/Working/i), hasAbort: true }),
+      expect.objectContaining({ messageId: 2, text: expect.stringContaining("Answer accepted"), hasAbort: true }),
+    ]));
+    expect(harness.operations.findIndex((operation) => operation.kind === "delete" && operation.messageId === 1))
+      .toBeLessThan(harness.operations.findIndex((operation) => operation.kind === "send" && operation.messageId === 2));
+    expect(sends[1].text).not.toMatch(/ask[ _]user/i);
   });
 
-  it("shows one standard prompt failure after ask_user activity events", async () => {
+  it("deletes Working and leaves one standard failure visible after ask_user", async () => {
     const harness = createPromptHarness({
       onPrompt: (callbacks) => {
         callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
@@ -908,16 +1173,18 @@ describe("prompt handler", () => {
     });
 
     await expect(harness.run()).resolves.toBe(false);
-
-    const visibleMessages = harness.operations.filter(
-      (operation): operation is Extract<TelegramOperation, { kind: "send" | "edit" }> =>
-        operation.kind === "send" || operation.kind === "edit",
+    expect(harness.operations).toContainEqual({ kind: "delete", messageId: 1 });
+    const failure = harness.operations.find(
+      (operation) => operation.kind === "send" && operation.text === "⚠️ prompt failed",
     );
-    expect(visibleMessages).toHaveLength(1);
-    expect(visibleMessages[0]).toMatchObject({ kind: "send", text: "⚠️ prompt failed", hasAbort: false });
-    expect(visibleMessages[0].text).not.toMatch(/ask[ _]user/i);
-    expect(harness.operations.filter((operation) => operation.kind === "markup")).toEqual([]);
-    expect(harness.trackCallbackMessages).toEqual([]);
+    expect(failure).toMatchObject({ kind: "send", messageId: 2, hasAbort: false });
+    expect(harness.operations.filter(
+      (operation) => operation.kind === "edit" && operation.messageId === 1,
+    )).toEqual([]);
+    expect(harness.operations.filter(
+      (operation) => (operation.kind === "send" || operation.kind === "edit")
+        && /ask[ _]user/i.test(operation.text),
+    )).toEqual([]);
   });
 
   it("gives the first assistant output Abort ownership", async () => {

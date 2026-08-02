@@ -92,12 +92,13 @@ Owns the prompt execution lifecycle and one serialized chronological segment wor
 - debounced, ordered Telegram sends/edits for dirty segment revisions
 - creates a temporary initial Abort owner after extension binding and callback subscription, immediately before prompting
 - lets the first visible activity, assistant, or legacy tool output adopt that message ID
-- retains attach-before-detach migration of the single Abort keyboard to later output messages
+- serializes `ask_user` dialog handoff behind pending output/adoption, deleting unused status or neutralizing Abort on adopted content before its Cancel control opens
+- retains attach-before-detach migration of the single Abort keyboard to later output messages after dialog control ends
 - native `typing` refreshes throughout the prompt, stopping only when the run settles
 - deletes an unused status on silent success or edits it on early failure
 - drains delivery before cleanup, then performs Abort cleanup and response/error finalization
 
-The segment worker owns every activity/assistant send and edit plus Abort migration, so the first visible activity, assistant, or legacy tool output adopts the temporary Working message in place and normal output does not gain a separate status row. Activity and assistant segments remain chronological; adjacent events of one kind continue the open message, while a kind switch starts a new message. The Abort button follows newer output messages until the run settles, and `/abort` remains available as a fallback. On silent success the unused temporary status is deleted; on early abort or failure it is edited into the terminal status. The worker drains all pending revisions before controls are cleared, and typing stops only after settlement.
+The segment worker owns every activity/assistant send and edit plus Abort migration, so the first visible activity, assistant, or legacy tool output adopts the temporary Working message in place and normal output does not gain a separate status row. `ask_user` is dialog-backed rather than stream activity: its control handoff is serialized behind pending output, so an unused Working message is deleted or already adopted content has Abort cleared before the dialog's Cancel button opens. Activity and assistant segments remain chronological; adjacent events of one kind continue the open message, while a kind switch starts a new message. The Abort button follows newer output messages until the run settles, and `/abort` remains available as a fallback. On silent success the unused temporary status is deleted; ordinary early abort or failure edits it into the terminal status. After a successful dialog handoff, failure sends one standalone notice; if deletion failed, the neutralized surviving Working message remains the failure target. The worker drains all pending revisions before controls are cleared, and typing stops only after settlement.
 
 ### `src/pi-session.ts`
 `PiSessionService.steer()` forwards ordinary follow-on text to the active SDK `AgentSession.steer()` queue. Steering uses the active queue and does not create a second prompt handler or prompt flow.
