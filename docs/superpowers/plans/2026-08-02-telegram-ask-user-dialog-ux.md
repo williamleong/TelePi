@@ -105,7 +105,7 @@ git commit -m "fix: streamline dialog fallback selections"
 - Consumes: `openSelect(target, title, options, dialogOptions?)` and other extension-dialog methods.
 - Produces: no implicit timers; explicit positive finite timeout handling; select panels containing full option labels.
 
-- [ ] **Step 1: Write failing persistence and rendering tests**
+- [x] **Step 1: Write failing persistence and rendering tests**
 
 Update the test manager to remove `defaultTimeoutMs`. Add a fake-timer test:
 
@@ -123,7 +123,7 @@ vi.useRealTimers();
 
 Change the open-select expectation so the rendered body contains numbered full labels, including a title and description separated by an em dash. Keep the existing explicit `{ timeout: 5 }` regression.
 
-- [ ] **Step 2: Run focused tests and verify failure**
+- [x] **Step 2: Run focused tests and verify failure**
 
 Run:
 
@@ -134,7 +134,7 @@ npx vitest run test/bot/extension-dialogs.test.ts test/bot.test.ts
 
 Expected: the no-timeout test observes finalization at the old default, and the select-panel expectation lacks option labels.
 
-- [ ] **Step 3: Remove the implicit timeout and list options**
+- [x] **Step 3: Remove the implicit timeout and list options**
 
 Remove `EXTENSION_UI_TIMEOUT_MS` and `defaultTimeoutMs`. In `createDialogTimeout`, return `undefined` unless `timeoutMs` is finite and greater than zero:
 
@@ -153,7 +153,7 @@ const rendered = renderDialogPanel(title, [...optionLines, "Use the buttons belo
 
 Keep `trimLine(option, 44)` for Telegram button labels and preserve the indexed callback values.
 
-- [ ] **Step 4: Run focused and complete verification**
+- [x] **Step 4: Run focused and complete verification**
 
 Run:
 
@@ -166,7 +166,7 @@ npm run build
 
 Expected: 0 failures and a successful TypeScript build.
 
-- [ ] **Step 5: Commit the TelePi implementation**
+- [x] **Step 5: Commit the TelePi implementation**
 
 ```bash
 cd /home/tsllwl/pi_ws/TelePi/.worktrees/telepi-ask-user-ux

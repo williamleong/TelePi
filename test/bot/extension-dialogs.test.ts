@@ -14,7 +14,6 @@ describe("extension dialog manager", () => {
       getContextKey: (ctx) => `${String(ctx.chatId)}::${ctx.messageThreadId ?? "root"}`,
       sendTextMessage,
       editMessage,
-      defaultTimeoutMs: 50,
     });
 
     return { manager, sendTextMessage, editMessage };
@@ -23,29 +22,50 @@ describe("extension dialog manager", () => {
   it("opens and resolves select dialogs after the callback answer step", async () => {
     const { manager, sendTextMessage, editMessage } = createManager();
 
-    const pendingChoice = manager.openSelect(target, "Pick one", ["Alpha", "Beta"]);
+    const pendingChoice = manager.openSelect(target, "Pick one", ["Alpha — Stop deployment", "Beta — Continue deployment"]);
     await Promise.resolve();
 
-    const opened = renderDialogPanel("Pick one", ["2 options available.", "Use the buttons below."], "🧭");
+    const opened = renderDialogPanel("Pick one", [
+      "1. Alpha — Stop deployment",
+      "2. Beta — Continue deployment",
+      "Use the buttons below.",
+    ], "🧭");
     expect(sendTextMessage).toHaveBeenCalledWith(target, opened.text, expect.objectContaining({
       fallbackText: opened.fallbackText,
       parseMode: "HTML",
     }));
 
     const result = await manager.resolveSelect(target, "1", 1, 1);
-    expect(result.callbackText).toBe("Selected Beta");
+    expect(result.callbackText).toBe("Selected Beta — Continue deployment");
     expect(editMessage).not.toHaveBeenCalled();
 
     await result.afterAnswer?.();
 
-    const selected = renderDialogPanel("Pick one", ["Selected: Beta"], "✅");
+    const selected = renderDialogPanel("Pick one", ["Selected: Beta — Continue deployment"], "✅");
     expect(editMessage).toHaveBeenCalledWith(
       target,
       1,
       selected.text,
       expect.objectContaining({ fallbackText: selected.fallbackText, parseMode: "HTML" }),
     );
-    await expect(pendingChoice).resolves.toBe("Beta");
+    await expect(pendingChoice).resolves.toBe("Beta — Continue deployment");
+  });
+
+  it("keeps dialogs without an explicit timeout pending", async () => {
+    const { manager, editMessage } = createManager();
+
+    vi.useFakeTimers();
+    try {
+      const pending = manager.openSelect(target, "Pick one", ["Alpha", "Beta"]);
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(manager.hasPending(target)).toBe(true);
+      expect(editMessage).not.toHaveBeenCalled();
+      await manager.cancelPending(target);
+      await expect(pending).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("resolves select dialogs by dialogId when the callback target loses its thread context", async () => {
@@ -188,7 +208,6 @@ describe("extension dialog manager", () => {
       getContextKey: (ctx) => `${String(ctx.chatId)}::${ctx.messageThreadId ?? "root"}`,
       sendTextMessage,
       editMessage,
-      defaultTimeoutMs: 50,
     });
 
     const pendingChoice = manager.openSelect(target, "Pick one", ["Alpha"]);
