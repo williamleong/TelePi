@@ -1041,6 +1041,25 @@ describe("createBot", () => {
       expect(api.sendMessage).not.toHaveBeenCalled();
     });
 
+    it("ignores an allowed topic edit without a thread ID", async () => {
+      const { bot, api, registry } = setupBot();
+      const chatSession = registry.getSession()!;
+
+      await bot.handleUpdate(createTestUpdate({
+        message: {
+          text: undefined,
+          entities: undefined,
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup", is_forum: true },
+          from: { id: ALLOWED_USER_ID, is_bot: false, first_name: "Test" },
+          forum_topic_edited: { name: "Project kickoff" },
+        },
+      }));
+
+      expect(chatSession.service.setSessionName).not.toHaveBeenCalled();
+      expect(registry.registry.getOrCreate).not.toHaveBeenCalled();
+      expect(api.sendMessage).not.toHaveBeenCalled();
+    });
+
     it("does not create a session for a renamed topic without one", async () => {
       const { bot, api, registry } = setupBot();
 
