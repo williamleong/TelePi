@@ -684,6 +684,29 @@ describe("prompt handler", () => {
     expect(harness.trackCallbackMessages).toEqual([sends[0].messageId]);
   });
 
+  it("shows one standard prompt failure after ask_user activity events", async () => {
+    const harness = createPromptHarness({
+      onPrompt: (callbacks) => {
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        callbacks.onToolUpdate("question-1", "waiting for input");
+        callbacks.onToolEnd("question-1", false);
+        throw new Error("prompt failed");
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(false);
+
+    const visibleMessages = harness.operations.filter(
+      (operation): operation is Extract<TelegramOperation, { kind: "send" | "edit" }> =>
+        operation.kind === "send" || operation.kind === "edit",
+    );
+    expect(visibleMessages).toHaveLength(1);
+    expect(visibleMessages[0]).toMatchObject({ kind: "send", text: "⚠️ prompt failed", hasAbort: false });
+    expect(visibleMessages[0].text).not.toMatch(/ask[ _]user/i);
+    expect(harness.operations.filter((operation) => operation.kind === "markup")).toEqual([]);
+    expect(harness.trackCallbackMessages).toEqual([]);
+  });
+
   it("gives the first assistant output Abort ownership", async () => {
     let harness!: ReturnType<typeof createPromptHarness>;
     harness = createPromptHarness({
