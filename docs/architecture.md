@@ -92,7 +92,7 @@ Owns the prompt execution lifecycle:
 
 ### `src/bot/commands/*`
 Grouped command handlers split by concern:
-- `basic.ts` — `/start`, `/help`, `/commands`, `/abort`, `/session`, `/retry`
+- `basic.ts` — `/start`, `/help`, `/commands`, `/abort`, `/session`, `/retry`, `/activity`
 - `sessions.ts` — `/sessions`, `/switch`, `/new`, `/handback`
 - `model.ts` — `/model` and model picker rendering
 - `tree.ts` — `/tree`, `/branch`, `/label`
