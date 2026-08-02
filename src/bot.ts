@@ -72,7 +72,6 @@ import { getVoiceBackendStatus, transcribeAudio } from "./voice.js";
 
 const EDIT_DEBOUNCE_MS = 1500;
 const TYPING_INTERVAL_MS = 4500;
-const EXTENSION_UI_TIMEOUT_MS = 60_000;
 const DEFAULT_IMAGE_PROMPT = "Please analyze this image.";
 const CALLBACK_MESSAGE_CONTEXT_LIMIT = 1000;
 const THREADLESS_FORUM_CALLBACK_EXPIRED_TEXT = "Expired, run the command again in this topic";
@@ -348,7 +347,6 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     getContextKey,
     sendTextMessage: (target, text, options) => sendTextMessage(bot.api, target, text, options),
     editMessage: (target, messageId, text, options) => safeEditMessage(bot, target, messageId, text, options),
-    defaultTimeoutMs: EXTENSION_UI_TIMEOUT_MS,
   });
 
   const answerCallbackQuerySafely = async (
