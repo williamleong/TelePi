@@ -1372,6 +1372,27 @@ export class PiSessionRegistry {
       onSessionChange,
       serviceConfig.workspaceOverride,
     )
+      .catch(async (error) => {
+        if (!serviceConfig.restoredSessionFile || !isInvalidSavedSessionError(error, serviceConfig.restoredSessionFile)) {
+          throw error;
+        }
+
+        try {
+          this.topicSessionStore.delete(key);
+        } catch {
+          console.warn(`Could not remove invalid Pi session for Telegram context ${key}.`);
+        }
+        console.warn(`Saved Pi session for Telegram context ${key} is invalid; starting a new session.`);
+
+        return PiSessionService.create(
+          {
+            ...this.config,
+            telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
+            piSessionPath: undefined,
+          },
+          onSessionChange,
+        );
+      })
       .then((service) => {
         this.inflight.delete(key);
 
@@ -1429,6 +1450,7 @@ export class PiSessionRegistry {
   private createServiceConfig(key: string): {
     config: TelePiConfig;
     workspaceOverride?: string;
+    restoredSessionFile?: string;
   } {
     const bootstrapPath = this.consumeBootstrapSessionPath();
     if (bootstrapPath) {
@@ -1481,6 +1503,7 @@ export class PiSessionRegistry {
         piSessionPath: saved.sessionFile,
       },
       workspaceOverride: workspace,
+      restoredSessionFile: saved.sessionFile,
     };
   }
 
@@ -1511,6 +1534,17 @@ export class PiSessionRegistry {
     this.generations.set(key, nextGeneration);
     return nextGeneration;
   }
+}
+
+function isInvalidSavedSessionError(error: unknown, sessionFile: string): boolean {
+  if (error instanceof Error && error.message.startsWith("Session file is not a valid pi session:")) {
+    return error.message.includes(sessionFile);
+  }
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "EISDIR" || code === "ENOTDIR" || code === "EACCES";
 }
 
 function normalizeNewSessionOptions(

@@ -2342,6 +2342,58 @@ describe("PiSessionService", () => {
     }
   });
 
+  it.each([
+    ["directory", () => Object.assign(new Error("EISDIR: illegal operation on a directory"), { code: "EISDIR" })],
+    ["malformed file", (savedPath: string) => new Error(`Session file is not a valid pi session: ${savedPath}`)],
+  ])("replaces an invalid saved %s with a new session", async (_label, createRestoreError) => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "telepi-registry-"));
+    const savedPath = path.join(tempDir, "saved.jsonl");
+    const store = TopicSessionStore.memory();
+
+    if (_label === "directory") {
+      mkdirSync(savedPath);
+    } else {
+      writeFileSync(savedPath, "not valid JSONL\\n");
+    }
+    store.set("1::99", { sessionFile: savedPath, workspace: tempDir });
+    const restoreError = createRestoreError(savedPath);
+    mockState.SessionManager.open.mockImplementationOnce(() => {
+      throw restoreError;
+    });
+
+    try {
+      const registry = await PiSessionRegistry.create(createConfig(), store);
+      const service = await registry.getOrCreate({ chatId: 1, messageThreadId: 99 });
+
+      expect(service).toBe(registry.get({ chatId: 1, messageThreadId: 99 }));
+      expect(mockState.SessionManager.create).toHaveBeenCalledWith("/workspace/base");
+      expect(store.get("1::99")).toEqual({
+        sessionFile: "/tmp/session-1.jsonl",
+        workspace: "/workspace/base",
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retains a persisted topic session when session creation has an unrelated provider error", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "telepi-registry-"));
+    const savedPath = path.join(tempDir, "saved.jsonl");
+    const store = TopicSessionStore.memory();
+    writeFileSync(savedPath, "{}\\n");
+    store.set("1::99", { sessionFile: savedPath, workspace: tempDir });
+    mockState.createAgentSessionRuntime.mockRejectedValueOnce(new Error("provider unavailable"));
+
+    try {
+      const registry = await PiSessionRegistry.create(createConfig(), store);
+
+      await expect(registry.getOrCreate({ chatId: 1, messageThreadId: 99 })).rejects.toThrow("provider unavailable");
+      expect(store.get("1::99")).toEqual({ sessionFile: savedPath, workspace: tempDir });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("deletes only a missing saved topic session before creating a new one", async () => {
     const store = TopicSessionStore.memory();
     store.set("1::99", { sessionFile: "/missing/saved.jsonl", workspace: "/workspace/missing" });
