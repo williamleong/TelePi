@@ -65,7 +65,10 @@ export function getDefaultTelePiStateDir(
     return path.join(homeDirectory, "Library", "Application Support", "TelePi");
   }
 
-  return path.join(xdgStateHome?.trim() || path.join(homeDirectory, ".local", "state"), "telepi");
+  return path.join(
+    xdgStateHome?.trim() || process.env.XDG_STATE_HOME?.trim() || path.join(homeDirectory, ".local", "state"),
+    "telepi",
+  );
 }
 
 export function getDefaultTopicSessionStatePath(

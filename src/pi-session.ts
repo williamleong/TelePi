@@ -645,9 +645,10 @@ export class PiSessionService {
   static async create(
     config: TelePiConfig,
     onSessionChange?: (location: PiSessionLocation) => void,
+    initialWorkspaceOverride?: string,
   ): Promise<PiSessionService> {
     const service = new PiSessionService(config, onSessionChange);
-    service.handle = await createPiSession(config);
+    service.handle = await createPiSession(config, undefined, initialWorkspaceOverride);
     service.currentWorkspace = service.handle.runtime.cwd;
     return service;
   }
@@ -1365,7 +1366,12 @@ export class PiSessionRegistry {
         console.warn(`Could not update Pi session for Telegram context ${key}.`);
       }
     };
-    const createPromise = PiSessionService.create(this.createServiceConfig(key), onSessionChange)
+    const serviceConfig = this.createServiceConfig(key);
+    const createPromise = PiSessionService.create(
+      serviceConfig.config,
+      onSessionChange,
+      serviceConfig.workspaceOverride,
+    )
       .then((service) => {
         this.inflight.delete(key);
 
@@ -1420,13 +1426,18 @@ export class PiSessionRegistry {
     this.inflight.clear();
   }
 
-  private createServiceConfig(key: string): TelePiConfig {
+  private createServiceConfig(key: string): {
+    config: TelePiConfig;
+    workspaceOverride?: string;
+  } {
     const bootstrapPath = this.consumeBootstrapSessionPath();
     if (bootstrapPath) {
       return {
-        ...this.config,
-        telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
-        piSessionPath: bootstrapPath,
+        config: {
+          ...this.config,
+          telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
+          piSessionPath: bootstrapPath,
+        },
       };
     }
 
@@ -1438,9 +1449,11 @@ export class PiSessionRegistry {
     }
     if (!saved) {
       return {
-        ...this.config,
-        telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
-        piSessionPath: undefined,
+        config: {
+          ...this.config,
+          telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
+          piSessionPath: undefined,
+        },
       };
     }
     if (!existsSync(saved.sessionFile)) {
@@ -1451,18 +1464,40 @@ export class PiSessionRegistry {
         console.warn(`Could not remove missing Pi session for Telegram context ${key}.`);
       }
       return {
-        ...this.config,
-        telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
-        piSessionPath: undefined,
+        config: {
+          ...this.config,
+          telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
+          piSessionPath: undefined,
+        },
       };
     }
 
+    const workspace = this.resolveSavedWorkspace(key, saved.sessionFile, saved.workspace);
     return {
-      ...this.config,
-      telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
-      workspace: saved.workspace,
-      piSessionPath: saved.sessionFile,
+      config: {
+        ...this.config,
+        telegramAllowedUserIdSet: new Set(this.config.telegramAllowedUserIds),
+        workspace,
+        piSessionPath: saved.sessionFile,
+      },
+      workspaceOverride: workspace,
     };
+  }
+
+  private resolveSavedWorkspace(key: string, sessionFile: string, savedWorkspace: string): string {
+    const resolvedSavedWorkspace = resolveWorkspacePathForRuntime(savedWorkspace);
+    if (resolvedSavedWorkspace) {
+      return resolvedSavedWorkspace;
+    }
+
+    const headerWorkspace = resolveWorkspacePathForRuntime(
+      readSessionHeader(resolveSessionPathForRuntime(sessionFile))?.cwd,
+    );
+    const effectiveWorkspace = headerWorkspace ?? this.config.workspace;
+    console.warn(
+      `Saved workspace ${savedWorkspace} for Telegram context ${key} is unavailable; restoring session in ${effectiveWorkspace}.`,
+    );
+    return effectiveWorkspace;
   }
 
   private consumeBootstrapSessionPath(): string | undefined {

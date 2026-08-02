@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
@@ -2156,7 +2156,7 @@ describe("PiSessionService", () => {
     const sessionFile = path.join(tempDir, "saved.jsonl");
     writeFileSync(sessionFile, "{}\n");
     const store = TopicSessionStore.memory();
-    store.set("1::99", { sessionFile, workspace: "/workspace/saved" });
+    store.set("1::99", { sessionFile, workspace: tempDir });
 
     try {
       const registry = await PiSessionRegistry.create(createConfig(), store);
@@ -2165,8 +2165,141 @@ describe("PiSessionService", () => {
       expect(mockState.SessionManager.open).toHaveBeenCalledWith(
         sessionFile,
         undefined,
-        "/workspace/saved",
+        tempDir,
       );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("restores a saved session in its stored workspace before an available header workspace", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "telepi-registry-"));
+    const savedWorkspace = path.join(tempDir, "saved-workspace");
+    const headerWorkspace = path.join(tempDir, "header-workspace");
+    const sessionFile = path.join(tempDir, "saved.jsonl");
+    mkdirSync(savedWorkspace);
+    mkdirSync(headerWorkspace);
+    writeFileSync(
+      sessionFile,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "stored-workspace-first",
+        timestamp: "2025-01-03T00:00:00.000Z",
+        cwd: headerWorkspace,
+      })}\n`,
+    );
+    const store = TopicSessionStore.memory();
+    store.set("1::99", { sessionFile, workspace: savedWorkspace });
+
+    try {
+      const registry = await PiSessionRegistry.create(createConfig(), store);
+      await registry.getOrCreate({ chatId: 1, messageThreadId: 99 });
+
+      expect(mockState.SessionManager.open).toHaveBeenCalledWith(sessionFile, undefined, savedWorkspace);
+      expect(store.get("1::99")).toEqual({ sessionFile, workspace: savedWorkspace });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("restores a saved session in its available header workspace when its stored workspace is missing", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "telepi-registry-"));
+    const headerWorkspace = path.join(tempDir, "header-workspace");
+    const sessionFile = path.join(tempDir, "saved.jsonl");
+    mkdirSync(headerWorkspace);
+    writeFileSync(
+      sessionFile,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "saved-header-workspace",
+        timestamp: "2025-01-03T00:00:00.000Z",
+        cwd: headerWorkspace,
+      })}\n`,
+    );
+    const store = TopicSessionStore.memory();
+    store.set("1::99", { sessionFile, workspace: "/workspace/missing" });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    try {
+      const registry = await PiSessionRegistry.create(createConfig(), store);
+      await registry.getOrCreate({ chatId: 1, messageThreadId: 99 });
+
+      expect(mockState.SessionManager.open).toHaveBeenCalledWith(sessionFile, undefined, headerWorkspace);
+      expect(store.get("1::99")).toEqual({ sessionFile, workspace: headerWorkspace });
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("/workspace/missing"));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("restores a saved session in the configured workspace when stored and header workspaces are missing", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "telepi-registry-"));
+    const sessionFile = path.join(tempDir, "saved.jsonl");
+    writeFileSync(
+      sessionFile,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "saved-no-workspace",
+        timestamp: "2025-01-03T00:00:00.000Z",
+        cwd: "/workspace/header-missing",
+      })}\n`,
+    );
+    const store = TopicSessionStore.memory();
+    store.set("1::99", { sessionFile, workspace: "/workspace/stored-missing" });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    try {
+      const registry = await PiSessionRegistry.create(createConfig(), store);
+      await registry.getOrCreate({ chatId: 1, messageThreadId: 99 });
+
+      expect(mockState.SessionManager.open).toHaveBeenCalledWith(sessionFile, undefined, "/workspace/base");
+      expect(store.get("1::99")).toEqual({ sessionFile, workspace: "/workspace/base" });
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("/workspace/stored-missing"));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists a disk-backed topic mapping across registries without sharing it with the root context", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "telepi-registry-disk-"));
+    const statePath = path.join(tempDir, "topic-sessions.json");
+    const workspace = path.join(tempDir, "workspace");
+    const sessionFile = path.join(tempDir, "saved.jsonl");
+    const topic = { chatId: 1, messageThreadId: 99 };
+    mkdirSync(workspace);
+    writeFileSync(
+      sessionFile,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "disk-backed-session",
+        timestamp: "2025-01-03T00:00:00.000Z",
+        cwd: workspace,
+      })}\n`,
+    );
+
+    try {
+      const storeA = TopicSessionStore.open(statePath);
+      const registryA = await PiSessionRegistry.create(createConfig({ workspace }), storeA);
+      const serviceA = await registryA.getOrCreate(topic);
+      await serviceA.switchSession(sessionFile);
+      registryA.dispose();
+
+      expect(TopicSessionStore.open(statePath).get("1::99")).toEqual({ sessionFile, workspace });
+
+      mockState.reset();
+      const storeB = TopicSessionStore.open(statePath);
+      const registryB = await PiSessionRegistry.create(createConfig({ workspace }), storeB);
+      await registryB.getOrCreate({ chatId: 1 });
+      await registryB.getOrCreate(topic);
+
+      expect(mockState.SessionManager.create).toHaveBeenCalledWith(workspace);
+      expect(mockState.SessionManager.open).toHaveBeenCalledWith(sessionFile, undefined, workspace);
+      expect(storeB.get("1::root")?.sessionFile).not.toBe(sessionFile);
+      expect(storeB.get("1::99")).toEqual({ sessionFile, workspace });
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -2278,14 +2411,14 @@ describe("PiSessionService", () => {
     const sessionFile = path.join(tempDir, "saved.jsonl");
     writeFileSync(sessionFile, "{}\n");
     const store = TopicSessionStore.memory();
-    store.set("1::99", { sessionFile, workspace: "/workspace/saved" });
+    store.set("1::99", { sessionFile, workspace: tempDir });
 
     try {
       const registry = await PiSessionRegistry.create(createConfig(), store);
       await registry.getOrCreate({ chatId: 1, messageThreadId: 99 });
       registry.dispose();
 
-      expect(store.get("1::99")).toEqual({ sessionFile, workspace: "/workspace/saved" });
+      expect(store.get("1::99")).toEqual({ sessionFile, workspace: tempDir });
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

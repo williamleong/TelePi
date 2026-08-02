@@ -10,8 +10,36 @@ import {
 
 describe("platform paths", () => {
   it("uses XDG state storage on Linux", () => {
-    expect(getDefaultTelePiStateDir("/home/test", "linux", "/state")).toBe("/state/telepi");
-    expect(getDefaultTelePiStateDir("/home/test", "linux")).toBe("/home/test/.local/state/telepi");
+    const originalXdgStateHome = process.env.XDG_STATE_HOME;
+    delete process.env.XDG_STATE_HOME;
+
+    try {
+      expect(getDefaultTelePiStateDir("/home/test", "linux", "/state")).toBe("/state/telepi");
+      expect(getDefaultTelePiStateDir("/home/test", "linux")).toBe("/home/test/.local/state/telepi");
+    } finally {
+      if (originalXdgStateHome === undefined) {
+        delete process.env.XDG_STATE_HOME;
+      } else {
+        process.env.XDG_STATE_HOME = originalXdgStateHome;
+      }
+    }
+  });
+
+  it("uses XDG_STATE_HOME from the environment by default on Linux", () => {
+    const originalXdgStateHome = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = "/state/from-environment";
+
+    try {
+      expect(getDefaultTopicSessionStatePath("/home/test", "linux")).toBe(
+        "/state/from-environment/telepi/topic-sessions.json",
+      );
+    } finally {
+      if (originalXdgStateHome === undefined) {
+        delete process.env.XDG_STATE_HOME;
+      } else {
+        process.env.XDG_STATE_HOME = originalXdgStateHome;
+      }
+    }
   });
 
   it("uses Application Support on macOS", () => {
