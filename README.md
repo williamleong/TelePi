@@ -233,7 +233,15 @@ Sessions, inline keyboards, `/retry` state, and active topic-name mappings are i
 
 Any non-TelePi slash command that matches the active Pi session's discovered commands is forwarded into Pi unchanged. That means Telegram can now trigger file-based prompt templates (for example `/review`), skills (`/skill:browser-tools`), and compatible extension commands. Interactive extension commands can also open Telegram-native select/confirm/input dialogs while the command is running.
 
-Activity details are on by default and scoped independently per chat or forum topic. They reset to on when TelePi restarts. While a prompt runs, thinking and deterministic compact tool rows are appended as chronological activity segments alongside assistant segments; models and providers may emit no thinking. Foreground Agent rows also edit in place with the subagent's compact current activity, such as `reading…` or `running command…`, and settle to `Done` or `Error`. Use `/activity off` to hide thinking/tool activity and restore the existing `TOOL_VERBOSITY` presentation, or `/activity on` to enable it again.
+Activity details are on by default and scoped independently per chat or forum topic. They reset to on when TelePi restarts. While a prompt runs, thinking and deterministic compact tool rows are appended as chronological activity segments alongside assistant segments; models and providers may emit no thinking. Foreground Agent rows also edit in place with the subagent's compact current activity, such as `reading…` or `running command…`, and settle to `Done` or `Error`.
+
+> 🧠 Thinking
+> **Inspecting provider state**
+>
+> • ⌨️ Bash
+> npm test
+
+Complete `**…**` provider-thinking lines render as bold, while inline Markdown remains literal. Use `/activity off` to hide thinking/tool activity and restore the existing `TOOL_VERBOSITY` presentation, or `/activity on` to enable it again.
 
 Typing is the pre-output progress signal: it starts immediately, refreshes every 4.5 seconds, and remains active until the prompt succeeds, fails, is aborted, or cannot activate. `/abort` works before any output exists; once the first activity or assistant output is sent, a single movable `⏹ Abort` button follows the newest output message. Output changes kind by sealing the current segment and appending the next activity or assistant segment, while adjacent events of the same kind continue in the open message (with Telegram-sized continuation chunks when needed). Thinking is rendered with the compact plain `🧠 Thinking` heading, and a tool row follows it after one empty line. Successful completion adds no status message. Ordinary follow-on text during the same active run steers Pi; media and commands are not steering inputs.
 
