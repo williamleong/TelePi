@@ -1,10 +1,16 @@
 import { createBot, registerCommands } from "./bot.js";
 import { clearPersistentPiSessionPathEnv, loadConfig } from "./config.js";
 import { isEntrypoint } from "./entrypoint.js";
+import { getDefaultTopicSessionStatePath } from "./paths.js";
 import { PiSessionRegistry } from "./pi-session.js";
+import { TopicSessionStore } from "./topic-session-store.js";
 
 const MAX_RESTART_ATTEMPTS = 5;
 const RESTART_DELAY_MS = 3000;
+
+export function createTopicSessionStore(): TopicSessionStore {
+  return TopicSessionStore.open(getDefaultTopicSessionStatePath());
+}
 
 export async function startBot(): Promise<void> {
   let sessionRegistry: PiSessionRegistry | undefined;
@@ -17,7 +23,8 @@ export async function startBot(): Promise<void> {
     if (config.piSessionPath) {
       clearPersistentPiSessionPathEnv();
     }
-    sessionRegistry = await PiSessionRegistry.create(config);
+    const topicSessionStore = createTopicSessionStore();
+    sessionRegistry = await PiSessionRegistry.create(config, topicSessionStore);
     bot = createBot(config, sessionRegistry);
     await registerCommands(bot);
 
