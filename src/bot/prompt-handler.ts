@@ -50,6 +50,10 @@ function stringifyToolUpdate(value: unknown): string {
   }
 }
 
+function isDialogBackedTool(toolName: string): boolean {
+  return toolName === "ask_user";
+}
+
 export type HandleUserPrompt = (
   ctx: Context,
   target: PiSessionContext,
@@ -128,6 +132,7 @@ async function runPromptFlow(
   const streamSegments = createStreamSegments();
   const toolStates = new Map<string, ToolState>();
   const toolCounts = new Map<string, number>();
+  const dialogBackedToolCallIds = new Set<string>();
   let abortOwnerMessageId: number | undefined;
   const abortOwnerMessageIds = new Set<number>();
   let deliveryTimer: NodeJS.Timeout | undefined;
@@ -580,6 +585,10 @@ async function runPromptFlow(
       void requestDelivery();
     },
     onToolStart: (toolName, toolCallId, args) => {
+      if (isDialogBackedTool(toolName)) {
+        dialogBackedToolCallIds.add(toolCallId);
+        return;
+      }
       if (activityEnabled) {
         streamSegments.startTool(toolName, toolCallId, args);
         void requestDelivery();
@@ -617,6 +626,9 @@ async function runPromptFlow(
       }, `Failed to send tool start message for ${toolName}`);
     },
     onToolUpdate: (toolCallId, partialResult) => {
+      if (dialogBackedToolCallIds.has(toolCallId)) {
+        return;
+      }
       if (activityEnabled) {
         if (streamSegments.updateTool(toolCallId, partialResult)) {
           void requestDelivery();
@@ -637,6 +649,9 @@ async function runPromptFlow(
       );
     },
     onToolEnd: (toolCallId, isError) => {
+      if (dialogBackedToolCallIds.delete(toolCallId)) {
+        return;
+      }
       if (activityEnabled) {
         if (streamSegments.finishTool(toolCallId, isError)) {
           void requestDelivery();

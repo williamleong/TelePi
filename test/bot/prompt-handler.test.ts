@@ -634,6 +634,79 @@ describe("prompt handler", () => {
     }));
   });
 
+  it.each([
+    [true, "all"],
+    [false, "all"],
+    [false, "summary"],
+    [false, "errors-only"],
+  ] as const)(
+    "does not render ask_user as tool activity with activity=%s and verbosity=%s",
+    async (activityEnabled, toolVerbosity) => {
+      const harness = createPromptHarness({
+        activityEnabled,
+        toolVerbosity,
+        onPrompt: (callbacks) => {
+          callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+          callbacks.onToolUpdate("question-1", "waiting for input");
+          callbacks.onToolEnd("question-1", true);
+        },
+      });
+
+      await expect(harness.run()).resolves.toBe(true);
+      expect(harness.operations.filter(
+        (operation) => operation.kind === "send"
+          || operation.kind === "edit"
+          || operation.kind === "markup",
+      )).toEqual([]);
+      expect(harness.trackCallbackMessages).toEqual([]);
+    },
+  );
+
+  it("resumes normal delivery and Abort ownership after ask_user resolves", async () => {
+    const harness = createPromptHarness({
+      activityEnabled: true,
+      toolVerbosity: "all",
+      onPrompt: (callbacks) => {
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        callbacks.onToolUpdate("question-1", "waiting for input");
+        callbacks.onToolEnd("question-1", false);
+        callbacks.onTextDelta("Answer accepted");
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    const sends = harness.operations.filter(
+      (operation): operation is Extract<TelegramOperation, { kind: "send" }> => operation.kind === "send",
+    );
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatchObject({ text: expect.stringContaining("Answer accepted"), hasAbort: true });
+    expect(sends[0].text).not.toMatch(/ask[ _]user/i);
+    expect(harness.trackCallbackMessages).toEqual([sends[0].messageId]);
+  });
+
+  it("shows one standard prompt failure after ask_user activity events", async () => {
+    const harness = createPromptHarness({
+      onPrompt: (callbacks) => {
+        callbacks.onToolStart("ask_user", "question-1", { question: "Choose one" });
+        callbacks.onToolUpdate("question-1", "waiting for input");
+        callbacks.onToolEnd("question-1", false);
+        throw new Error("prompt failed");
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(false);
+
+    const visibleMessages = harness.operations.filter(
+      (operation): operation is Extract<TelegramOperation, { kind: "send" | "edit" }> =>
+        operation.kind === "send" || operation.kind === "edit",
+    );
+    expect(visibleMessages).toHaveLength(1);
+    expect(visibleMessages[0]).toMatchObject({ kind: "send", text: "⚠️ prompt failed", hasAbort: false });
+    expect(visibleMessages[0].text).not.toMatch(/ask[ _]user/i);
+    expect(harness.operations.filter((operation) => operation.kind === "markup")).toEqual([]);
+    expect(harness.trackCallbackMessages).toEqual([]);
+  });
+
   it("gives the first assistant output Abort ownership", async () => {
     let harness!: ReturnType<typeof createPromptHarness>;
     harness = createPromptHarness({
