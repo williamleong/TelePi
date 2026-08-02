@@ -3,6 +3,14 @@ import {
   renderActivityTranscript,
 } from "../../src/bot/activity-rendering.js";
 
+function count(text: string, needle: string): number {
+  return text.split(needle).length - 1;
+}
+
+function stripHeadingAndTags(text: string): string {
+  return text.replace(/^🧠 Thinking(?: \(continued\))?\n?/, "").replace(/<\/?b>/g, "");
+}
+
 describe("activity transcript", () => {
   it("assembles thinking blocks verbatim and preserves event order", () => {
     const transcript = createActivityTranscript();
@@ -150,6 +158,71 @@ describe("activity transcript", () => {
 
     expect(chunk.fallbackText).toContain("Deploy Secret");
     expect(chunk.fallbackText).not.toContain("must-not-appear");
+  });
+
+  it("renders complete outer thinking Markdown lines as escaped bold HTML", () => {
+    const transcript = createActivityTranscript();
+    transcript.appendThinking({
+      blockKey: "1:0",
+      delta: "**Inspect <state>**\nChecking **inline** text\n**unfinished",
+    });
+
+    expect(renderActivityTranscript(transcript)[0]).toMatchObject({
+      text: "🧠 Thinking\n<b>Inspect &lt;state&gt;</b>\nChecking **inline** text\n**unfinished",
+      fallbackText: "🧠 Thinking\nInspect <state>\nChecking **inline** text\n**unfinished",
+    });
+  });
+
+  it.each([
+    ["  **Bold line**  ", "  <b>Bold line</b>", "  Bold line"],
+    ["*single stars*", "*single stars*", "*single stars*"],
+    ["**first** and **second**", "**first** and **second**", "**first** and **second**"],
+    ["****", "****", "****"],
+    [
+      "**First**\nplain <line>\n  **Second & <third>**  ",
+      "<b>First</b>\nplain &lt;line&gt;\n  <b>Second &amp; &lt;third&gt;</b>",
+      "First\nplain <line>\n  Second & <third>",
+    ],
+  ])("renders only whole non-empty outer bold lines: %j", (source, html, fallback) => {
+    const transcript = createActivityTranscript();
+    transcript.appendThinking({ blockKey: "1:0", delta: source });
+    const [chunk] = renderActivityTranscript(transcript);
+
+    expect(chunk?.text).toBe(`🧠 Thinking\n${html}`);
+    expect(chunk?.fallbackText).toBe(`🧠 Thinking\n${fallback}`);
+  });
+
+  it.each([
+    ["extra-leading-asterisk", "***text**"],
+    ["extra-trailing-asterisk", "**text***"],
+    ["extra-at-both-edges", "***text***"],
+  ])("keeps %s thinking boundaries literal", (_name, source) => {
+    const transcript = createActivityTranscript();
+    transcript.appendThinking({ blockKey: "1:0", delta: source });
+
+    expect(renderActivityTranscript(transcript)).toEqual([{
+      text: `🧠 Thinking\n${source}`,
+      fallbackText: `🧠 Thinking\n${source}`,
+      parseMode: "HTML",
+      sourceText: `🧠 Thinking\n${source}`,
+    }]);
+  });
+
+  it("chunks long bold thinking lines into independently balanced bold HTML", () => {
+    const source = `**${"x".repeat(9_000)}**`;
+    const transcript = createActivityTranscript();
+    transcript.appendThinking({ blockKey: "1:0", delta: source });
+
+    const chunks = renderActivityTranscript(transcript);
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.text.length).toBeLessThanOrEqual(4_000);
+      expect(chunk.text).not.toContain("**");
+      expect(count(chunk.text, "<b>")).toBe(count(chunk.text, "</b>"));
+    }
+    expect(chunks.map((chunk) => stripHeadingAndTags(chunk.fallbackText)).join(""))
+      .toBe("x".repeat(9_000));
   });
 
   it("escapes HTML while preserving plain thinking text", () => {

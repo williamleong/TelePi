@@ -86,6 +86,11 @@ type ActivityBlock = {
   fallback: string;
 };
 
+type ThinkingCharacter = {
+  value: string;
+  bold: boolean;
+};
+
 export function renderActivityTranscript(transcript: ActivityTranscript): RenderedChunk[] {
   const chunks: RenderedChunk[] = [];
   let current: ActivityBlock | undefined;
@@ -154,28 +159,73 @@ function appendThinking(
   flush: () => void,
 ): void {
   const normalizedText = text.trimEnd();
-  const completeBlock = renderThinkingBlock(normalizedText, false);
+  const characters = parseThinkingCharacters(normalizedText);
+  const completeBlock = renderThinkingBlock(characters, false);
   if (fits(completeBlock)) {
     appendCompleteBlock(completeBlock, appendBlock, flush);
     return;
   }
 
   flush();
-  const characters = Array.from(normalizedText);
   let offset = 0;
   let continued = false;
 
   while (offset < characters.length) {
     const length = largestFittingThinkingPrefix(characters, offset, continued);
-    const fragment = characters.slice(offset, offset + length).join("");
+    const fragment = characters.slice(offset, offset + length);
     appendCompleteBlock(renderThinkingBlock(fragment, continued), appendBlock, flush);
     offset += length;
     continued = true;
   }
 }
 
+function parseThinkingCharacters(text: string): ThinkingCharacter[] {
+  const characters: ThinkingCharacter[] = [];
+
+  for (const segment of text.split(/(\n)/)) {
+    if (!segment) {
+      continue;
+    }
+
+    if (segment === "\n") {
+      characters.push({ value: segment, bold: false });
+      continue;
+    }
+
+    const match = /^(\s*)(.*?)(\s*)$/.exec(segment);
+    const leading = match?.[1] ?? "";
+    const content = match?.[2] ?? segment;
+    const trailing = match?.[3] ?? "";
+    const boldMatch = /^\*\*((?:(?!\*\*)[\s\S])+?)\*\*$/.exec(content);
+    const boldContent = boldMatch?.[1];
+    const hasUnambiguousBoundaries = Boolean(
+      boldContent && !boldContent.startsWith("*") && !boldContent.endsWith("*"),
+    );
+
+    appendThinkingText(characters, leading, false);
+    if (boldContent && hasUnambiguousBoundaries) {
+      appendThinkingText(characters, boldContent, true);
+    } else {
+      appendThinkingText(characters, content, false);
+    }
+    appendThinkingText(characters, trailing, false);
+  }
+
+  return characters;
+}
+
+function appendThinkingText(
+  characters: ThinkingCharacter[],
+  text: string,
+  bold: boolean,
+): void {
+  for (const value of text) {
+    characters.push({ value, bold });
+  }
+}
+
 function largestFittingThinkingPrefix(
-  characters: string[],
+  characters: ThinkingCharacter[],
   offset: number,
   continued: boolean,
 ): number {
@@ -184,8 +234,8 @@ function largestFittingThinkingPrefix(
 
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
-    const text = characters.slice(offset, offset + middle).join("");
-    if (fits(renderThinkingBlock(text, continued))) {
+    const fragment = characters.slice(offset, offset + middle);
+    if (fits(renderThinkingBlock(fragment, continued))) {
       low = middle;
     } else {
       high = middle - 1;
@@ -195,12 +245,31 @@ function largestFittingThinkingPrefix(
   return low;
 }
 
-function renderThinkingBlock(text: string, continued: boolean): ActivityBlock {
+function renderThinkingBlock(characters: ThinkingCharacter[], continued: boolean): ActivityBlock {
   const header = continued ? "🧠 Thinking (continued)" : "🧠 Thinking";
+  const fallback = characters.map((character) => character.value).join("");
   return {
-    html: text ? `${header}\n${escapeHTML(text)}` : header,
-    fallback: text ? `${header}\n${text}` : header,
+    html: fallback ? `${header}\n${renderThinkingHTML(characters)}` : header,
+    fallback: fallback ? `${header}\n${fallback}` : header,
   };
+}
+
+function renderThinkingHTML(characters: ThinkingCharacter[]): string {
+  const runs: Array<{ text: string; bold: boolean }> = [];
+
+  for (const character of characters) {
+    const previous = runs.at(-1);
+    if (previous?.bold === character.bold) {
+      previous.text += character.value;
+    } else {
+      runs.push({ text: character.value, bold: character.bold });
+    }
+  }
+
+  return runs.map((run) => {
+    const escaped = escapeHTML(run.text);
+    return run.bold ? `<b>${escaped}</b>` : escaped;
+  }).join("");
 }
 
 function fitToolBlock(entry: Extract<ActivityEntry, { kind: "tool" }>): ActivityBlock {
