@@ -821,7 +821,7 @@ describe("prompt handler", () => {
     }
   });
 
-  it("contains activity delivery failures and continues with later assistant segments", async () => {
+  it("reports one terminal failure after an activity delivery failure while delivering later assistant segments", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const activitySendAttempted = deferred();
     const harness = createPromptHarness({
@@ -840,17 +840,58 @@ describe("prompt handler", () => {
     });
 
     try {
-      await expect(harness.run()).resolves.toBe(true);
+      await expect(harness.run()).resolves.toBe(false);
       expect(harness.operations).toContainEqual(
         expect.objectContaining({ kind: "send", messageId: 2, text: expect.stringContaining("assistant answer") }),
       );
-      expect(harness.operations.some(
-        (operation) => (operation.kind === "send" || operation.kind === "edit") && /Working|Done/i.test(operation.text),
-      )).toBe(false);
+      expect(harness.operations.filter(
+        (operation) => operation.kind === "send" && operation.text.includes("activity delivery failed"),
+      )).toHaveLength(1);
     } finally {
       consoleError.mockRestore();
     }
   });
+
+  it.each(["all", "errors-only"] as const)(
+    "reports one terminal failure after an activity-off %s tool delivery failure while delivering assistant text",
+    async (toolVerbosity) => {
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      const toolDeliveryText = toolVerbosity === "all" ? "Running:" : "❌";
+      const harness = createPromptHarness({
+        activityEnabled: false,
+        toolVerbosity,
+        onSend: (text, messageId) => {
+          if (messageId === 1 && text.includes(toolDeliveryText)) {
+            return Promise.reject(new Error("activity-off tool delivery failed"));
+          }
+        },
+        onPrompt: (callbacks) => {
+          callbacks.onToolStart("bash", "tool-1", {});
+          callbacks.onToolUpdate("tool-1", "stderr");
+          if (toolVerbosity === "errors-only") {
+            callbacks.onToolEnd("tool-1", true);
+          }
+          callbacks.onTextDelta("assistant answer");
+          if (toolVerbosity === "all") {
+            callbacks.onToolEnd("tool-1", true);
+          }
+          callbacks.onAgentEnd();
+        },
+      });
+
+      try {
+        await expect(harness.run()).resolves.toBe(false);
+        expect(harness.operations).toContainEqual(
+          expect.objectContaining({ kind: "send", messageId: 2, text: expect.stringContaining("assistant answer") }),
+        );
+        expect(harness.operations.filter(
+          (operation) => operation.kind === "send" && operation.text.includes("activity-off tool delivery failed"),
+        )).toHaveLength(1);
+      } finally {
+        consoleError.mockRestore();
+      }
+    },
+  );
 
   it("shows a standalone prompt failure after an assistant delivery failure", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -868,12 +909,12 @@ describe("prompt handler", () => {
 
     try {
       await expect(harness.run()).resolves.toBe(false);
-      expect(harness.operations).toContainEqual(
-        expect.objectContaining({ kind: "send", messageId: 2, text: expect.stringContaining("assistant delivery failed") }),
-      );
+      expect(harness.operations.filter(
+        (operation) => operation.kind === "send" && operation.text.includes("assistant delivery failed"),
+      )).toHaveLength(1);
       expect(harness.operations.filter(
         (operation) => operation.kind === "send" || operation.kind === "edit",
-      )).toHaveLength(1);
+      )).toHaveLength(2);
     } finally {
       consoleError.mockRestore();
     }

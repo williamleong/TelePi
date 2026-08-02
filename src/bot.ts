@@ -670,7 +670,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     renameForumTopicToSessionName,
     sendBusyReply,
     trySteer: async (target, text) => {
-      if (chatState.isLocallyBusy(target)) {
+      if (chatState.isSteeringBlocked(target)) {
         return false;
       }
       const piSession = getExistingSession(target);

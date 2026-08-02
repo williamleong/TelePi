@@ -214,6 +214,11 @@ async function runPromptFlow(
     return renderAssistantSegment(segment.assistantText, delivery);
   };
 
+  const recordDeliveryFailure = (error: unknown, message: string): void => {
+    console.error(message, error);
+    deliveryFailure ??= error;
+  };
+
   const deliverSegment = async (segment: StreamSegment): Promise<void> => {
     const revision = segment.revision;
     const previousChunks = segment.chunks;
@@ -334,7 +339,7 @@ async function runPromptFlow(
                 await deliverSegment(segment);
               } catch (error) {
                 if (segment.kind === "activity") {
-                  console.error("Failed to update Telegram activity transcript", error);
+                  recordDeliveryFailure(error, "Failed to update Telegram activity transcript");
                   streamSegments.markDeliveryFailed(segment.id);
                   continue;
                 }
@@ -347,9 +352,7 @@ async function runPromptFlow(
         }
       },
       onError: (error) => {
-        if (deliveryFailure === undefined) {
-          deliveryFailure = error;
-        }
+        recordDeliveryFailure(error, "Failed to deliver Telegram prompt output");
       },
     };
     segmentDeliveryOperation = operation;
@@ -371,12 +374,9 @@ async function runPromptFlow(
 
     deliveryQueue.push({
       readyAt: Date.now(),
-      execute: async () => {
-        try {
-          await delivery();
-        } catch (error) {
-          console.error(errorMessage, error);
-        }
+      execute: delivery,
+      onError: (error) => {
+        recordDeliveryFailure(error, errorMessage);
       },
     });
     void runDeliveryWorker();
@@ -394,7 +394,7 @@ async function runPromptFlow(
 
   const forceSegmentDelivery = (): Promise<void> => {
     clearDeliveryTimer();
-    if (deliveryFailure || streamSegments.getDirtySegments().length === 0) {
+    if (streamSegments.getDirtySegments().length === 0) {
       return deliveryWorkerPromise ?? Promise.resolve();
     }
     if (segmentDeliveryOperation) {

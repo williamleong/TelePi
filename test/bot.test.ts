@@ -1791,7 +1791,7 @@ describe("createBot", () => {
     expect(registry.getSession(ALLOWED_CHAT_ID, 202)?.service.prompt).toHaveBeenCalledWith("prompt topic B");
   });
 
-  it("keeps the busy reply when local work owns the target", async () => {
+  it("steers a second same-topic message through the original deferred prompt flow", async () => {
     let resolvePrompt!: () => void;
     const { bot, pi, api } = setupBot({
       piSessionOverrides: {
@@ -1804,15 +1804,32 @@ describe("createBot", () => {
       },
     });
 
-    await bot.handleUpdate(createTestUpdate({ message: { text: "start local work" } }));
-    await nextTick();
-    await bot.handleUpdate(createTestUpdate({ message: { text: "do not steer local work" } }));
+    await bot.handleUpdate(createTestUpdate({ message: { text: "start original prompt" } }));
+    await vi.waitFor(() => {
+      expect(pi.service.prompt).toHaveBeenCalledTimes(1);
+      expect(pi.service.subscribe).toHaveBeenCalledTimes(1);
+    });
+    pi.emitTextDelta("original chronological output");
+    await vi.waitFor(() => {
+      expect(api.sendMessage.mock.calls.some(
+        (call) => String(call[1]).includes("original chronological output"),
+      )).toBe(true);
+    });
 
-    expect(pi.service.steer).not.toHaveBeenCalled();
-    expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Still working on previous message...");
+    await bot.handleUpdate(createTestUpdate({ message: { text: "steer the original prompt" } }));
 
+    expect(pi.service.steer).toHaveBeenCalledWith("steer the original prompt");
+    expect(pi.service.prompt).toHaveBeenCalledTimes(1);
+    expect(pi.service.subscribe).toHaveBeenCalledTimes(1);
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Still working"))).toBe(false);
+
+    pi.emitTextDelta(" after steering");
     resolvePrompt();
-    await nextTick();
+    await vi.waitFor(() => {
+      expect(api.editMessageText.mock.calls.some(
+        (call) => String(call[2]).includes("original chronological output after steering"),
+      )).toBe(true);
+    });
   });
 
   it("consumes extension input before considering active-stream steering", async () => {
