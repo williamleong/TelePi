@@ -175,17 +175,17 @@ async function runPromptFlow(
       return;
     }
 
+    abortOwnerMessageIds.add(messageId);
+    trackCallbackMessage?.(target, messageId);
     await bot.api.editMessageReplyMarkup(target.chatId, messageId, {
       reply_markup: abortKeyboard,
     });
-    trackCallbackMessage?.(target, messageId);
-    abortOwnerMessageIds.add(messageId);
 
     const previousOwnerMessageId = abortOwnerMessageId;
+    abortOwnerMessageId = messageId;
     if (previousOwnerMessageId !== undefined) {
       await clearAbortKeyboard(previousOwnerMessageId);
     }
-    abortOwnerMessageId = messageId;
   };
 
   const latestOutputMessageId = (): number | undefined => {

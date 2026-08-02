@@ -459,16 +459,18 @@ describe("prompt handler", () => {
     expect(harness.trackCallbackMessages).toEqual([1, 2, 4]);
   });
 
-  it("contains a later Abort attachment failure while delivering assistant output", async () => {
+  it.each([
+    ["success", false, true],
+    ["failure", true, false],
+  ])("cleans a rejected Abort candidate on %s finalization", async (_outcome, promptFails, expectedResult) => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const attachAttempted = deferred();
-    const promptRelease = deferred();
     let harness!: ReturnType<typeof createPromptHarness>;
     harness = createPromptHarness({
       onMarkup: (messageId, hasAbort) => {
         if (messageId === 2 && hasAbort) {
           attachAttempted.resolve();
-          return Promise.reject(new Error("attach failed"));
+          return Promise.reject(new Error("markup applied then rejected"));
         }
       },
       onPrompt: async (callbacks) => {
@@ -478,27 +480,22 @@ describe("prompt handler", () => {
         );
         callbacks.onTextDelta("first answer");
         await attachAttempted.promise;
-        callbacks.onTextDelta(" extended");
-        await promptRelease.promise;
+        if (promptFails) {
+          throw new Error("prompt failed");
+        }
       },
     });
 
-    const result = harness.run();
-    await attachAttempted.promise;
-    expect(harness.trackCallbackMessages).toEqual([1]);
-
-    await harness.waitForOperation(
-      (operation) => operation.kind === "edit" && operation.messageId === 2 && operation.text.includes("extended"),
-    );
-    promptRelease.resolve();
-
     try {
-      await expect(result).resolves.toBe(true);
-      expect(harness.operations.some(
-        (operation) => (operation.kind === "send" || operation.kind === "edit") && /Working|Done/i.test(operation.text),
-      )).toBe(false);
+      await expect(harness.run()).resolves.toBe(expectedResult);
+      expect(harness.trackCallbackMessages).toEqual([1, 2]);
+      expect(harness.markupAttempts).toContainEqual({ messageId: 2, hasAbort: true });
+      const clearedOwners = harness.operations.filter(
+        (operation): operation is Extract<TelegramOperation, { kind: "markup" }> =>
+          operation.kind === "markup" && !operation.hasAbort,
+      ).map((operation) => operation.messageId);
+      expect(clearedOwners).toEqual(expect.arrayContaining([1, 2]));
     } finally {
-      promptRelease.resolve();
       consoleError.mockRestore();
     }
   });
