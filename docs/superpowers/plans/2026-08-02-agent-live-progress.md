@@ -406,3 +406,29 @@ git log --oneline --decorate -5
 ```
 
 Expected: clean `feat/agent-live-progress` worktree with the design, implementation, tests, and documentation committed.
+
+---
+
+### Task 4: Address code-review edge cases
+
+**Files:**
+- Modify: `src/bot/activity-rendering.ts`
+- Modify: `docs/architecture.md`
+- Test: `test/bot/activity-rendering.test.ts`
+- Test: `test/bot/prompt-handler.test.ts`
+
+**Interfaces:**
+- Preserves: `ActivityTranscript.updateTool(toolCallId: string, partialResult: unknown): boolean`
+- Produces: one dedicated, bounded Telegram chunk for each Agent activity entry
+
+- [x] **Step 1: Reproduce delivered-chunk shrinkage, oversized descriptions, and throwing accessors**
+
+- [x] **Step 2: Verify the new tests fail for the reported reasons**
+
+- [x] **Step 3: Isolate Agent entries into dedicated chunks and bound descriptions to 512 characters**
+
+- [x] **Step 4: Ignore partial-result property access that throws**
+
+- [x] **Step 5: Cover structured updates in activity-off errors-only mode**
+
+- [x] **Step 6: Run focused activity and prompt-handler tests**

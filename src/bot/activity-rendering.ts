@@ -24,6 +24,7 @@ export interface ActivityTranscript {
 }
 
 export const ACTIVITY_MESSAGE_LIMIT = 4_000;
+const AGENT_DESCRIPTION_LIMIT = 512;
 
 export function createActivityTranscript(): ActivityTranscript {
   const entries: ActivityEntry[] = [];
@@ -119,7 +120,13 @@ export function renderActivityTranscript(transcript: ActivityTranscript): Render
 
   for (const entry of transcript.entries) {
     if (entry.kind === "tool") {
-      appendCompleteBlock(fitToolBlock(entry), appendBlock, flush);
+      if (entry.toolName === "Agent") {
+        flush();
+        appendCompleteBlock(fitToolBlock(entry), appendBlock, flush);
+        flush();
+      } else {
+        appendCompleteBlock(fitToolBlock(entry), appendBlock, flush);
+      }
       continue;
     }
 
@@ -234,7 +241,7 @@ function summarizeActivityTool(
   entry: Extract<ActivityEntry, { kind: "tool" }>,
 ): { label: string; detail?: string } {
   if (entry.toolName === "Agent") {
-    const description = readString(entry.args, "description")?.trim();
+    const description = boundText(readString(entry.args, "description")?.trim(), AGENT_DESCRIPTION_LIMIT);
     return {
       label: description ? `Agent — ${description}` : "Agent",
       detail: entry.detail,
@@ -272,25 +279,44 @@ function summarizeTool(toolName: string, args: unknown): { label: string; detail
 }
 
 function readString(value: unknown, key: string): string | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+
+    const field = (value as Record<string, unknown>)[key];
+    return typeof field === "string" ? field : undefined;
+  } catch {
     return undefined;
   }
-
-  const field = (value as Record<string, unknown>)[key];
-  return typeof field === "string" ? field : undefined;
 }
 
 function readNestedActivity(value: unknown): string | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+
+    const details = (value as Record<string, unknown>).details;
+    if (!details || typeof details !== "object" || Array.isArray(details)) {
+      return undefined;
+    }
+
+    return readString(details, "activity")?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function boundText(text: string | undefined, maxLength: number): string | undefined {
+  if (!text) {
     return undefined;
   }
 
-  const details = (value as Record<string, unknown>).details;
-  if (!details || typeof details !== "object" || Array.isArray(details)) {
-    return undefined;
-  }
-
-  return readString(details, "activity")?.trim() || undefined;
+  const characters = Array.from(text);
+  return characters.length <= maxLength
+    ? text
+    : `${characters.slice(0, maxLength).join("")}…`;
 }
 
 function formatPatternAndPath(pattern: string | undefined, path: string | undefined): string | undefined {

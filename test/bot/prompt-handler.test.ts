@@ -408,6 +408,38 @@ describe("prompt handler", () => {
     )).toHaveLength(1);
   });
 
+  it("settles Agent progress without discarding a delivered activity chunk", async () => {
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onPrompt: async (callbacks) => {
+        callbacks.onThinkingDelta({ blockKey: "1:0", delta: "x".repeat(3_900) });
+        await harness.waitForOperation(
+          (operation) => operation.kind === "send" && operation.messageId === 2,
+        );
+        callbacks.onToolStart("Agent", "agent-1", { description: "Find relevant code" });
+        await harness.waitForOperation(
+          (operation) => operation.kind === "send" && operation.messageId === 3,
+        );
+        callbacks.onToolUpdate("agent-1", {
+          details: { activity: "running command ".repeat(30) },
+        });
+        await harness.waitForOperation(
+          (operation) => operation.kind === "edit"
+            && operation.messageId === 3
+            && operation.text.includes("running command"),
+        );
+        callbacks.onToolEnd("agent-1", false);
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(harness.operations).toContainEqual(expect.objectContaining({
+      kind: "edit",
+      messageId: 3,
+      text: expect.stringContaining("Done"),
+    }));
+  });
+
   it("keeps structured tool updates readable when activity is disabled", async () => {
     const harness = createPromptHarness({
       activityEnabled: false,
@@ -424,6 +456,27 @@ describe("prompt handler", () => {
     await expect(harness.run()).resolves.toBe(true);
     expect(harness.operations).toContainEqual(expect.objectContaining({
       kind: "edit",
+      messageId: 2,
+      text: expect.stringContaining("running command"),
+    }));
+  });
+
+  it("keeps structured error updates readable in errors-only mode", async () => {
+    const harness = createPromptHarness({
+      activityEnabled: false,
+      toolVerbosity: "errors-only",
+      onPrompt: (callbacks) => {
+        callbacks.onToolStart("Agent", "agent-1", {});
+        callbacks.onToolUpdate("agent-1", {
+          details: { activity: "running command…" },
+        });
+        callbacks.onToolEnd("agent-1", true);
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(harness.operations).toContainEqual(expect.objectContaining({
+      kind: "send",
       messageId: 2,
       text: expect.stringContaining("running command"),
     }));
