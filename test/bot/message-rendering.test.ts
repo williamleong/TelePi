@@ -95,12 +95,30 @@ describe("bot message rendering helpers", () => {
       .toBe("Voice transcription: openai, parakeet.");
     expect(renderVoiceSupportHTML([], "Missing ffmpeg")).toContain("⚠️ Missing ffmpeg");
 
-    const dialogPanel = renderDialogPanel("Pick one", ["2 options available.", "Use the buttons below."], "🧭");
-    expect(dialogPanel.parseMode).toBe("HTML");
-    expect(dialogPanel.text).toContain("<pre>");
-    expect(dialogPanel.fallbackText).toContain("┌");
-    expect(dialogPanel.fallbackText).toContain("🧭 Pick one");
-    expect(dialogPanel.fallbackText).toContain("Use the buttons below.");
+    const dialogPanel = renderDialogPanel(
+      "Choose deployment <mode>\n\nContext:\nProduction traffic is live.",
+      ["1. Stop — safest", "2. Continue <fast>", "Use the buttons below."],
+      "🧭",
+    );
+    expect(dialogPanel).toEqual({
+      text: [
+        "<b>🧭 Choose deployment &lt;mode&gt;</b>",
+        "",
+        "Context:\nProduction traffic is live.",
+        "",
+        "1. Stop — safest\n2. Continue &lt;fast&gt;\nUse the buttons below.",
+      ].join("\n"),
+      fallbackText: [
+        "🧭 Choose deployment <mode>",
+        "",
+        "Context:\nProduction traffic is live.",
+        "",
+        "1. Stop — safest\n2. Continue <fast>\nUse the buttons below.",
+      ].join("\n"),
+      parseMode: "HTML",
+    });
+    expect(dialogPanel.text).not.toMatch(/<pre>|<code>/);
+    expect(dialogPanel.fallbackText).not.toMatch(/[┌┐└┘├┤│─]/u);
 
     expect(renderToolStartMessage("bash")).toEqual({
       text: "<b>🔧 Running:</b> <code>bash</code>",

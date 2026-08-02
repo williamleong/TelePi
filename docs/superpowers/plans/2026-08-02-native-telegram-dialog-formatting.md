@@ -29,7 +29,7 @@
 - Consumes: `renderDialogPanel(title: string, bodyLines: string[], titleIcon?: string)` and the existing `escapeHTML(text: string)` helper.
 - Produces: the unchanged `RenderedText` shape `{ text: string; fallbackText: string; parseMode: "HTML" }`, with native HTML and undecorated plain text.
 
-- [ ] **Step 1: Replace the box-rendering assertion with a failing native-format regression**
+- [x] **Step 1: Replace the box-rendering assertion with a failing native-format regression**
 
 Replace the current `dialogPanel` assertions in `test/bot/message-rendering.test.ts` with an exact multiline test:
 
@@ -60,7 +60,7 @@ expect(dialogPanel.text).not.toMatch(/<pre>|<code>/);
 expect(dialogPanel.fallbackText).not.toMatch(/[┌┐└┘├┤│─]/u);
 ```
 
-- [ ] **Step 2: Run the focused test and verify the old renderer fails**
+- [x] **Step 2: Run the focused test and verify the old renderer fails**
 
 Run:
 
@@ -70,7 +70,7 @@ npx vitest run test/bot/message-rendering.test.ts
 
 Expected: the exact `dialogPanel` assertion fails because the current output starts with `<pre>┌...` and its fallback contains box-drawing characters.
 
-- [ ] **Step 3: Implement the minimal native renderer**
+- [x] **Step 3: Implement the minimal native renderer**
 
 Delete `DIALOG_PANEL_MIN_WIDTH`, `DIALOG_PANEL_MAX_WIDTH`, `buildDialogPanelText()`, `frameDialogPanelLine()`, and `wrapDialogPanelLine()`. Add these focused helpers near `renderDialogPanel()`:
 
@@ -120,7 +120,7 @@ export function renderDialogPanel(title: string, bodyLines: string[], titleIcon?
 
 This retains internal blank lines, removes leading and trailing blank lines, escapes each HTML line, and groups the heading, title remainder, and caller body into readable sections.
 
-- [ ] **Step 4: Run the focused renderer test and verify it passes**
+- [x] **Step 4: Run the focused renderer test and verify it passes**
 
 Run:
 
@@ -130,7 +130,7 @@ npx vitest run test/bot/message-rendering.test.ts
 
 Expected: all tests in `test/bot/message-rendering.test.ts` pass.
 
-- [ ] **Step 5: Commit the renderer and regression test**
+- [x] **Step 5: Commit the renderer and regression test**
 
 ```bash
 git add src/bot/message-rendering.ts test/bot/message-rendering.test.ts
@@ -150,7 +150,7 @@ git commit -m "fix: render Telegram dialogs as native text"
 - Consumes: the revised `renderDialogPanel()` output through existing select, confirm, input, timeout, cancellation, and completion paths.
 - Produces: evidence that native rendering preserves extension-dialog behavior, Telegram HTML fallback, and TypeScript compatibility.
 
-- [ ] **Step 1: Run focused integration tests**
+- [x] **Step 1: Run focused integration tests**
 
 Run:
 
@@ -160,7 +160,7 @@ npx vitest run test/bot/extension-dialogs.test.ts test/bot/telegram-transport.te
 
 Expected: all tests pass without changes to callback routing, timeout handling, message editing, or transport fallback.
 
-- [ ] **Step 2: Run the complete test suite**
+- [x] **Step 2: Run the complete test suite**
 
 Run:
 
@@ -170,7 +170,7 @@ npm test
 
 Expected: Vitest reports zero failed tests.
 
-- [ ] **Step 3: Run the TypeScript build**
+- [x] **Step 3: Run the TypeScript build**
 
 Run:
 
@@ -180,7 +180,7 @@ npm run build
 
 Expected: `tsc` exits successfully with no diagnostics.
 
-- [ ] **Step 4: Check the final diff**
+- [x] **Step 4: Check the final diff**
 
 Run:
 
@@ -192,7 +192,7 @@ git diff HEAD^ -- src/bot/message-rendering.ts test/bot/message-rendering.test.t
 
 Expected: only the intended plan file is uncommitted, `git diff --check` prints nothing, and the source diff contains no dialog callback or lifecycle changes.
 
-- [ ] **Step 5: Commit the implementation plan progress**
+- [x] **Step 5: Commit the implementation plan progress**
 
 Mark completed checkboxes in this plan, then commit it separately:
 

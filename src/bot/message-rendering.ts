@@ -380,14 +380,40 @@ export function renderVoiceSupportHTML(backends: string[], warning?: string): st
   return warning ? `${status}\n⚠️ ${escapeHTML(warning)}` : status;
 }
 
-const DIALOG_PANEL_MIN_WIDTH = 22;
-const DIALOG_PANEL_MAX_WIDTH = 36;
+function normalizeDialogLines(lines: string[]): string[] {
+  const normalized = lines
+    .flatMap((line) => line.replace(/\r\n?/g, "\n").split("\n"))
+    .map((line) => line.trim());
+
+  while (normalized[0] === "") normalized.shift();
+  while (normalized.at(-1) === "") normalized.pop();
+  return normalized;
+}
+
+function renderDialogSection(lines: string[], html: boolean): string {
+  return lines.map((line) => html ? escapeHTML(line) : line).join("\n");
+}
 
 export function renderDialogPanel(title: string, bodyLines: string[], titleIcon?: string): RenderedText {
-  const panelText = buildDialogPanelText(titleIcon ? `${titleIcon} ${title}` : title, bodyLines);
+  const titleLines = normalizeDialogLines([title]);
+  const headingText = [titleIcon, titleLines.shift() ?? ""].filter(Boolean).join(" ");
+  const remainingTitleLines = normalizeDialogLines(titleLines);
+  const normalizedBodyLines = normalizeDialogLines(bodyLines);
+
+  const htmlSections = [
+    `<b>${escapeHTML(headingText)}</b>`,
+    remainingTitleLines.length > 0 ? renderDialogSection(remainingTitleLines, true) : undefined,
+    normalizedBodyLines.length > 0 ? renderDialogSection(normalizedBodyLines, true) : undefined,
+  ].filter((section): section is string => section !== undefined);
+  const plainSections = [
+    headingText,
+    remainingTitleLines.length > 0 ? renderDialogSection(remainingTitleLines, false) : undefined,
+    normalizedBodyLines.length > 0 ? renderDialogSection(normalizedBodyLines, false) : undefined,
+  ].filter((section): section is string => section !== undefined);
+
   return {
-    text: `<pre>${escapeHTML(panelText)}</pre>`,
-    fallbackText: panelText,
+    text: htmlSections.join("\n\n"),
+    fallbackText: plainSections.join("\n\n"),
     parseMode: "HTML",
   };
 }
@@ -835,82 +861,6 @@ export function renderPrefixedError(prefix: string, error: unknown, multiline = 
   };
 }
 
-function buildDialogPanelText(title: string, bodyLines: string[]): string {
-  const titleLines = wrapDialogPanelLine(title, DIALOG_PANEL_MAX_WIDTH);
-  const wrappedBodyLines = bodyLines.flatMap((line) => {
-    if (!line.trim()) {
-      return [""];
-    }
-    return wrapDialogPanelLine(line, DIALOG_PANEL_MAX_WIDTH);
-  });
-  const contentWidth = Math.max(
-    DIALOG_PANEL_MIN_WIDTH,
-    ...titleLines.map((line) => line.length),
-    ...wrappedBodyLines.map((line) => line.length),
-  );
-  const horizontal = "─".repeat(contentWidth + 2);
-  const lines = [
-    `┌${horizontal}┐`,
-    ...titleLines.map((line) => frameDialogPanelLine(line, contentWidth)),
-  ];
-
-  if (wrappedBodyLines.length > 0) {
-    lines.push(`├${horizontal}┤`, ...wrappedBodyLines.map((line) => frameDialogPanelLine(line, contentWidth)));
-  }
-
-  lines.push(`└${horizontal}┘`);
-  return lines.join("\n");
-}
-
-function frameDialogPanelLine(text: string, width: number): string {
-  return `│ ${text.padEnd(width, " ")} │`;
-}
-
-function wrapDialogPanelLine(text: string, maxWidth: number): string[] {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return [""];
-  }
-
-  const words = normalized.split(" ");
-  const lines: string[] = [];
-  let current = "";
-
-  for (const word of words) {
-    let remaining = word;
-    while (remaining.length > maxWidth) {
-      if (current) {
-        lines.push(current);
-        current = "";
-      }
-      lines.push(remaining.slice(0, maxWidth));
-      remaining = remaining.slice(maxWidth);
-    }
-
-    if (!remaining) {
-      continue;
-    }
-
-    if (!current) {
-      current = remaining;
-      continue;
-    }
-
-    if (current.length + 1 + remaining.length <= maxWidth) {
-      current += ` ${remaining}`;
-      continue;
-    }
-
-    lines.push(current);
-    current = remaining;
-  }
-
-  if (current) {
-    lines.push(current);
-  }
-
-  return lines.length > 0 ? lines : [""];
-}
 
 function isAbortError(message: string): boolean {
   return message.toLowerCase().includes("abort");
