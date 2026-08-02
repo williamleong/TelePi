@@ -66,7 +66,7 @@ TelePi gives Telegram access to a coding agent, so it is designed to stay privat
 - **Helpful recovery commands**: `/help` for quick usage guidance and `/retry` to resend the last prompt in the current chat/topic
 - **Extension dialog support**: Pi extension commands can ask for Telegram-native selects, confirms, and text input mid-command
 - **Native Telegram UX**: Topic-safe inline keyboards, typing indicators, HTML-formatted responses, friendly user-facing errors, auto-retry on rate limits
-- **Activity details**: Stream provider thinking verbatim and deterministic compact tool rows in a separate Telegram transcript
+- **Chronological prompt streaming**: Keep a status-only working message, then append thinking, tool activity, and assistant segments in Pi event order
 - **Security**: Telegram user allowlist, workspace-scoped tools, Docker support
 
 ## Full setup details
@@ -210,7 +210,7 @@ node dist/cli.js start
 | `/sessions` | List all sessions across all workspaces with tap-to-switch buttons |
 | `/sessions <path\|id>` | Switch directly to a specific session file or session ID/prefix |
 | `/model` | Pick a different AI model from an inline keyboard |
-| `/activity on\|off` | Enable or disable the separate activity transcript; off restores the existing `TOOL_VERBOSITY` presentation; bare `/activity` reports the current state |
+| `/activity on\|off` | Enable or disable thinking/tool activity segments; off restores the existing `TOOL_VERBOSITY` presentation; bare `/activity` reports the current state |
 | `/tree` | View the session entry tree; navigate with inline buttons |
 | `/branch <id>` | Navigate to a specific entry ID (with confirmation) |
 | `/label [args]` | Add or clear labels on entries for easy reference |
@@ -221,7 +221,9 @@ Sessions, inline keyboards, `/retry` state, and active topic-name mappings are i
 
 Any non-TelePi slash command that matches the active Pi session's discovered commands is forwarded into Pi unchanged. That means Telegram can now trigger file-based prompt templates (for example `/review`), skills (`/skill:browser-tools`), and compatible extension commands. Interactive extension commands can also open Telegram-native select/confirm/input dialogs while the command is running.
 
-Activity details are on by default and scoped independently per chat or forum topic. They reset to on when TelePi restarts. While a prompt runs, the separate activity transcript delivers provider thinking verbatim when available plus deterministic compact tool rows; models and providers may emit no thinking. Use `/activity off` to disable the separate activity transcript and restore the existing `TOOL_VERBOSITY` presentation, or `/activity on` to enable it again.
+Activity details are on by default and scoped independently per chat or forum topic. They reset to on when TelePi restarts. While a prompt runs, thinking and deterministic compact tool rows are appended as chronological activity segments alongside assistant segments; models and providers may emit no thinking. Use `/activity off` to hide thinking/tool activity and restore the existing `TOOL_VERBOSITY` presentation, or `/activity on` to enable it again.
+
+Each prompt starts with one status-only `⏳ Working…` message. Assistant text is never written into that message: every change of output kind seals the current segment and appends the next activity or `💬 Assistant` segment below it, while adjacent events of the same kind continue in the open message (with Telegram-sized continuation chunks when needed). One movable `⏹ Abort` button starts on the status message and follows the newest output message throughout the run. Telegram's native `typing` indicator starts immediately, refreshes every 4.5 seconds, and remains active until the prompt succeeds, fails, is aborted, or cannot activate.
 
 ## External Prompt Inbox
 
@@ -559,7 +561,8 @@ TelePi/
 │   │   ├── extension-dialogs.ts  ← Telegram-backed extension select/confirm/input dialogs
 │   │   ├── keyboard.ts           ← inline keyboard pagination helpers
 │   │   ├── message-rendering.ts  ← Telegram HTML/plain rendering and chunking helpers
-│   │   ├── prompt-handler.ts     ← prompt execution, streaming, and tool updates
+│   │   ├── prompt-handler.ts     ← chronological prompt delivery, Abort ownership, and typing lifecycle
+│   │   ├── stream-segments.ts     ← ordered activity/assistant segments and delivery metadata
 │   │   ├── slash-command.ts      ← slash-command normalization and command catalog helpers
 │   │   └── telegram-transport.ts ← safe reply/edit/send helpers and Telegram file downloads
 │   ├── config.ts                 ← environment config
