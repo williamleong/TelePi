@@ -74,7 +74,11 @@ export class TopicSessionStore {
     } catch {
       console.warn(`Could not write topic session state at ${this.filePath}`);
     } finally {
-      rmSync(tempPath, { force: true });
+      try {
+        rmSync(tempPath, { force: true });
+      } catch {
+        // Persistence failures must not escape through best-effort cleanup.
+      }
     }
   }
 }
