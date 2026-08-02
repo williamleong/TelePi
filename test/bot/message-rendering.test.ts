@@ -31,8 +31,10 @@ import {
   isMessageNotModifiedError,
   isRichMarkdownCandidate,
   isTelegramParseError,
+  TELEGRAM_MESSAGE_LIMIT,
   TELEGRAM_RICH_MESSAGE_LIMIT,
 } from "../../src/bot/message-rendering.js";
+import { SHORTENED_RESPONSE_MARKER } from "../../src/session-exchange-preview.js";
 
 describe("bot message rendering helpers", () => {
   const info = {
@@ -131,6 +133,23 @@ describe("bot message rendering helpers", () => {
     expect(rendered.text).toContain("<b>You</b>");
     expect(rendered.text).toContain("Use &lt;auth&gt; &amp; tests");
     expect(rendered.text).toContain("<b>Pi</b>");
+  });
+
+  it("bounds an escaped exchange preview without splitting entities or Unicode", () => {
+    const userText = `user-prefix-${"&<>🧪".repeat(197)}abc`;
+    const assistantText = `assistant-head-${"&<>🧪".repeat(394)}-assistant-tail`;
+
+    const rendered = renderSessionExchangePreview({ userText, assistantText });
+
+    expect(userText).toHaveLength(1_000);
+    expect(assistantText).toHaveLength(2_000);
+    expect(rendered.text.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
+    expect(rendered.text).not.toMatch(/&(?!amp;|lt;|gt;)/);
+    expect(rendered.text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    expect(rendered.fallbackText).toContain("You\nuser-prefix-");
+    expect(rendered.fallbackText).toContain("Pi\nassistant-head-");
+    expect(rendered.fallbackText).toContain(SHORTENED_RESPONSE_MARKER);
+    expect(rendered.fallbackText).toContain("-assistant-tail");
   });
 
   it("renders prompt and extension failures consistently", () => {

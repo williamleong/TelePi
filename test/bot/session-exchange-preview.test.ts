@@ -32,3 +32,18 @@ it("logs and suppresses preview failures", async () => {
   expect(log).toHaveBeenCalledWith("Failed to deliver resumed session preview:", expect.any(Error));
   log.mockRestore();
 });
+
+it("logs a preview lookup failure without sending", async () => {
+  const piSession = {
+    getLastExchangePreview: vi.fn().mockImplementation(() => {
+      throw new Error("Session context unavailable");
+    }),
+  } as any;
+  const send = vi.fn();
+  const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+  await expect(deliverSessionExchangePreview(piSession, send)).resolves.toBeUndefined();
+  expect(log).toHaveBeenCalledWith("Failed to deliver resumed session preview:", expect.any(Error));
+  expect(send).not.toHaveBeenCalled();
+  log.mockRestore();
+});

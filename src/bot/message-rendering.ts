@@ -1,7 +1,10 @@
 import { toFriendlyError } from "../errors.js";
 import { escapeHTML, formatTelegramHTML } from "../format.js";
 import type { PiSessionDiagnostic, PiSessionInfo } from "../pi-session.js";
-import type { PiSessionExchangePreview } from "../session-exchange-preview.js";
+import {
+  SHORTENED_RESPONSE_MARKER,
+  type PiSessionExchangePreview,
+} from "../session-exchange-preview.js";
 
 export type TelegramParseMode = "HTML";
 export type TelegramDelivery = "rich-markdown";
@@ -17,7 +20,23 @@ export type RenderedChunk = RenderedText & {
   sourceText: string;
 };
 
+export const TELEGRAM_MESSAGE_LIMIT = 4000;
+export const TELEGRAM_RICH_MESSAGE_LIMIT = 32768;
+const SESSION_EXCHANGE_ASSISTANT_MARKER = `\n\n${SHORTENED_RESPONSE_MARKER}\n\n`;
+const SESSION_EXCHANGE_USER_SHARE = 0.25;
+
 export function renderSessionExchangePreview(
+  preview: PiSessionExchangePreview,
+): RenderedText {
+  const rendered = renderSessionExchangePreviewText(preview);
+  if (rendered.text.length <= TELEGRAM_MESSAGE_LIMIT) {
+    return rendered;
+  }
+
+  return renderSessionExchangePreviewText(boundSessionExchangePreview(preview));
+}
+
+function renderSessionExchangePreviewText(
   preview: PiSessionExchangePreview,
 ): RenderedText {
   const fallbackText = [
@@ -45,8 +64,75 @@ export function renderSessionExchangePreview(
   };
 }
 
-export const TELEGRAM_MESSAGE_LIMIT = 4000;
-export const TELEGRAM_RICH_MESSAGE_LIMIT = 32768;
+function boundSessionExchangePreview(
+  preview: PiSessionExchangePreview,
+): PiSessionExchangePreview {
+  const availableLength = TELEGRAM_MESSAGE_LIMIT - renderSessionExchangePreviewText({
+    userText: "",
+    assistantText: "",
+  }).text.length;
+  const userLength = escapeHTML(preview.userText).length;
+  const assistantLength = escapeHTML(preview.assistantText).length;
+  const reservedUserLength = Math.min(userLength, Math.floor(availableLength * SESSION_EXCHANGE_USER_SHARE));
+
+  if (assistantLength <= availableLength - reservedUserLength) {
+    return {
+      userText: truncatePrefixToEscapedLength(preview.userText, availableLength - assistantLength),
+      assistantText: preview.assistantText,
+    };
+  }
+
+  const userText = truncatePrefixToEscapedLength(preview.userText, reservedUserLength);
+  const assistantBudget = availableLength - escapeHTML(userText).length;
+  return {
+    userText,
+    assistantText: truncateAssistantToEscapedLength(preview.assistantText, assistantBudget),
+  };
+}
+
+function truncateAssistantToEscapedLength(text: string, maxLength: number): string {
+  if (escapeHTML(text).length <= maxLength) {
+    return text;
+  }
+
+  const markerLength = escapeHTML(SESSION_EXCHANGE_ASSISTANT_MARKER).length;
+  const textBudget = maxLength - markerLength;
+  const head = truncatePrefixToEscapedLength(text, Math.ceil(textBudget * 0.6));
+  const tail = truncateSuffixToEscapedLength(text, textBudget - escapeHTML(head).length);
+  return `${head}${SESSION_EXCHANGE_ASSISTANT_MARKER}${tail}`;
+}
+
+function truncatePrefixToEscapedLength(text: string, maxLength: number): string {
+  let result = "";
+  let length = 0;
+
+  for (const character of text) {
+    const characterLength = escapeHTML(character).length;
+    if (length + characterLength > maxLength) {
+      break;
+    }
+    result += character;
+    length += characterLength;
+  }
+
+  return result;
+}
+
+function truncateSuffixToEscapedLength(text: string, maxLength: number): string {
+  let result = "";
+  let length = 0;
+
+  for (const character of Array.from(text).reverse()) {
+    const characterLength = escapeHTML(character).length;
+    if (length + characterLength > maxLength) {
+      break;
+    }
+    result = `${character}${result}`;
+    length += characterLength;
+  }
+
+  return result;
+}
 export const TOOL_OUTPUT_PREVIEW_LIMIT = 500;
 const STREAMING_PREVIEW_LIMIT = 3800;
 const FORMATTED_CHUNK_TARGET = 3000;
