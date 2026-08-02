@@ -73,6 +73,7 @@ function createPromptHarness(options: {
   onEdit?: (text: string, messageId: number) => Promise<void> | void;
   onMarkup?: (messageId: number, hasAbort: boolean) => Promise<void> | void;
   onDelete?: (messageId: number) => Promise<void> | void;
+  setActiveAbortMessage?: (messageId: number | undefined) => void;
   isBusy?: (target: { chatId: number }) => boolean;
   taskRunnerResult?: "started" | "busy";
   taskRunnerResults?: Array<"started" | "busy">;
@@ -243,6 +244,9 @@ function createPromptHarness(options: {
     extensionDialogs,
     trackCallbackMessage: (_target, messageId) => {
       trackCallbackMessages.push(messageId);
+    },
+    setActiveAbortMessage: (_target, messageId) => {
+      options.setActiveAbortMessage?.(messageId);
     },
     renameForumTopicToSessionName,
     sendBusyReply,
@@ -1244,6 +1248,28 @@ describe("prompt handler", () => {
       (operation): operation is Extract<TelegramOperation, { kind: "markup" }> =>
         operation.kind === "markup" && !operation.hasAbort,
     ).at(-1)).toMatchObject({ messageId: 1 });
+  });
+
+  it("publishes Abort ownership after attachment, migration, and cleanup", async () => {
+    const activeAbortMessages: Array<number | undefined> = [];
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      setActiveAbortMessage: (messageId) => activeAbortMessages.push(messageId),
+      onPrompt: async (callbacks) => {
+        callbacks.onThinkingDelta({ blockKey: "1", delta: "activity" });
+        await harness.waitForOperation(
+          (operation) => operation.kind === "send" && operation.messageId === 1 && operation.hasAbort,
+        );
+        callbacks.onTextDelta("assistant");
+        await harness.waitForOperation(
+          (operation) => operation.kind === "markup" && operation.messageId === 2 && operation.hasAbort,
+        );
+        callbacks.onAgentEnd();
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(activeAbortMessages).toEqual([1, 2, undefined]);
   });
 
   it("migrates the Abort owner on a kind switch and chunk rollover", async () => {
