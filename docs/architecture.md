@@ -91,13 +91,13 @@ Owns the prompt execution lifecycle and one serialized chronological segment wor
 - Pi callback routing into activity and assistant segments
 - debounced, ordered Telegram sends/edits for dirty segment revisions
 - creates a temporary initial Abort owner after session activation
-- lets the first stream chunk adopt that message ID
+- lets the first visible activity, assistant, or legacy tool output adopt that message ID
 - retains attach-before-detach migration of the single Abort keyboard to later output messages
 - native `typing` refreshes throughout the prompt, stopping only when the run settles
 - deletes an unused status on silent success or edits it on early failure
 - drains delivery before cleanup, then performs Abort cleanup and response/error finalization
 
-The segment worker owns every activity/assistant send and edit plus Abort migration, so the first activity or assistant segment adopts the temporary Working message in place and normal output does not gain a separate status row. Activity and assistant segments remain chronological; adjacent events of one kind continue the open message, while a kind switch starts a new message. The Abort button follows newer output messages until the run settles, and `/abort` remains available as a fallback. On silent success the unused temporary status is deleted; on early abort or failure it is edited into the terminal status. The worker drains all pending revisions before controls are cleared, and typing stops only after settlement.
+The segment worker owns every activity/assistant send and edit plus Abort migration, so the first visible activity, assistant, or legacy tool output adopts the temporary Working message in place and normal output does not gain a separate status row. Activity and assistant segments remain chronological; adjacent events of one kind continue the open message, while a kind switch starts a new message. The Abort button follows newer output messages until the run settles, and `/abort` remains available as a fallback. On silent success the unused temporary status is deleted; on early abort or failure it is edited into the terminal status. The worker drains all pending revisions before controls are cleared, and typing stops only after settlement.
 
 ### `src/pi-session.ts`
 `PiSessionService.steer()` forwards ordinary follow-on text to the active SDK `AgentSession.steer()` queue. Steering uses the active queue and does not create a second prompt handler or prompt flow.
