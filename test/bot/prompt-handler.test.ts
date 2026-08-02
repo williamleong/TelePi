@@ -377,6 +377,58 @@ describe("prompt handler", () => {
     ]);
   });
 
+  it("edits the Agent activity message with live progress", async () => {
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onPrompt: async (callbacks) => {
+        callbacks.onToolStart("Agent", "agent-1", { description: "Find relevant code" });
+        await harness.waitForOperation(
+          (operation) => operation.kind === "send" && operation.messageId === 2,
+        );
+        callbacks.onToolUpdate("agent-1", {
+          details: { activity: "running command…" },
+        });
+        await harness.waitForOperation(
+          (operation) => operation.kind === "edit"
+            && operation.messageId === 2
+            && operation.text.includes("running command"),
+        );
+        callbacks.onToolEnd("agent-1", false);
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(harness.operations).toContainEqual(expect.objectContaining({
+      kind: "edit",
+      messageId: 2,
+      text: expect.stringContaining("Done"),
+    }));
+    expect(harness.operations.filter(
+      (operation) => operation.kind === "send" && operation.messageId > 1,
+    )).toHaveLength(1);
+  });
+
+  it("keeps structured tool updates readable when activity is disabled", async () => {
+    const harness = createPromptHarness({
+      activityEnabled: false,
+      toolVerbosity: "all",
+      onPrompt: (callbacks) => {
+        callbacks.onToolStart("Agent", "agent-1", {});
+        callbacks.onToolUpdate("agent-1", {
+          details: { activity: "running command…" },
+        });
+        callbacks.onToolEnd("agent-1", true);
+      },
+    });
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(harness.operations).toContainEqual(expect.objectContaining({
+      kind: "edit",
+      messageId: 2,
+      text: expect.stringContaining("running command"),
+    }));
+  });
+
   it("status-only lifecycle marks a silent prompt done without an output message", async () => {
     const harness = createPromptHarness({
       onPrompt: (callbacks) => {

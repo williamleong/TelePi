@@ -36,6 +36,18 @@ export interface HandleUserPromptOptions {
   waitForCompletion?: boolean;
 }
 
+function stringifyToolUpdate(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
 export type HandleUserPrompt = (
   ctx: Context,
   target: PiSessionContext,
@@ -638,14 +650,24 @@ async function runPromptFlow(
       }, `Failed to send tool start message for ${toolName}`);
     },
     onToolUpdate: (toolCallId, partialResult) => {
-      if (activityEnabled || toolVerbosity === "none" || toolVerbosity === "summary") {
+      if (activityEnabled) {
+        if (streamSegments.updateTool(toolCallId, partialResult)) {
+          void requestDelivery();
+        }
+        return;
+      }
+      if (toolVerbosity === "none" || toolVerbosity === "summary") {
         return;
       }
       const state = toolStates.get(toolCallId);
       if (!state || !partialResult) {
         return;
       }
-      state.partialResult = appendWithCap(state.partialResult, partialResult, TOOL_OUTPUT_PREVIEW_LIMIT);
+      state.partialResult = appendWithCap(
+        state.partialResult,
+        stringifyToolUpdate(partialResult),
+        TOOL_OUTPUT_PREVIEW_LIMIT,
+      );
     },
     onToolEnd: (toolCallId, isError) => {
       if (activityEnabled) {
