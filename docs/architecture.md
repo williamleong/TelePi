@@ -90,7 +90,7 @@ Owns the prompt execution lifecycle and one serialized chronological segment wor
 - busy checks, session bootstrap, and extension binding
 - Pi callback routing into activity and assistant segments
 - debounced, ordered Telegram sends/edits for dirty segment revisions
-- creates a temporary initial Abort owner after session activation
+- creates a temporary initial Abort owner after extension binding and callback subscription, immediately before prompting
 - lets the first visible activity, assistant, or legacy tool output adopt that message ID
 - retains attach-before-detach migration of the single Abort keyboard to later output messages
 - native `typing` refreshes throughout the prompt, stopping only when the run settles

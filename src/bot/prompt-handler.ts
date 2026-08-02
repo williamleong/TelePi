@@ -251,6 +251,29 @@ async function runPromptFlow(
     return workingMessageId;
   };
 
+  const sendLegacyOutput = async (rendered: RenderedText): Promise<number> => {
+    const hasAbortOwner = abortOwnerMessageId !== undefined;
+    const message = await sendTextMessage(bot.api, target, rendered.text, {
+      parseMode: rendered.parseMode,
+      fallbackText: rendered.fallbackText,
+      replyMarkup: hasAbortOwner ? undefined : abortKeyboard,
+    });
+
+    if (!hasAbortOwner) {
+      abortOwnerMessageId = message.message_id;
+      abortOwnerMessageIds.add(message.message_id);
+      trackCallbackMessage?.(target, message.message_id);
+    } else {
+      try {
+        await migrateAbortOwner(message.message_id);
+      } catch (error) {
+        console.error("Failed to migrate Telegram Abort button", error);
+      }
+    }
+
+    return message.message_id;
+  };
+
   const latestOutputMessageId = (): number | undefined => {
     for (const segment of [...streamSegments.getSegments()].reverse()) {
       for (const chunk of [...segment.chunks].reverse()) {
@@ -599,8 +622,6 @@ async function runPromptFlow(
     void refreshChatScopedCommands(target, piSession);
   }
 
-  await ensureWorkingMessage();
-
   let unsubscribe: (() => void) | undefined;
   try {
     await piSession.bindExtensions({
@@ -693,16 +714,7 @@ async function runPromptFlow(
           return;
         }
 
-        const message = await sendTextMessage(bot.api, target, messageText.text, {
-          parseMode: messageText.parseMode,
-          fallbackText: messageText.fallbackText,
-        });
-        state.messageId = message.message_id;
-        try {
-          await migrateAbortOwner(message.message_id);
-        } catch (error) {
-          console.error("Failed to migrate Telegram Abort button", error);
-        }
+        state.messageId = await sendLegacyOutput(messageText);
       }, `Failed to send tool start message for ${toolName}`);
     },
     onToolUpdate: (toolCallId, partialResult) => {
@@ -751,15 +763,7 @@ async function runPromptFlow(
             return;
           }
 
-          const message = await sendTextMessage(bot.api, target, state.finalStatus!.text, {
-            parseMode: state.finalStatus!.parseMode,
-            fallbackText: state.finalStatus!.fallbackText,
-          });
-          try {
-            await migrateAbortOwner(message.message_id);
-          } catch (error) {
-            console.error("Failed to migrate Telegram Abort button", error);
-          }
+          await sendLegacyOutput(state.finalStatus!);
         }, `Failed to send tool error message for ${state.toolName}`);
         return;
       }
@@ -785,6 +789,8 @@ async function runPromptFlow(
       });
     },
   });
+
+    await ensureWorkingMessage();
 
     if (images && images.length > 0) {
       await piSession.prompt(userText, images);

@@ -72,6 +72,7 @@ function createPromptHarness(options: {
   onPrompt?: (callbacks: PiSessionCallbacks) => void | Promise<void>;
   promptError?: Error;
   bindExtensionsError?: Error;
+  onBindExtensions?: () => Promise<void> | void;
   subscribeError?: Error;
   ensureActiveSession?: () => Promise<unknown>;
   onSend?: (text: string, messageId: number) => Promise<void> | void;
@@ -131,9 +132,12 @@ function createPromptHarness(options: {
   };
 
   const fakePiSession = {
-    bindExtensions: options.bindExtensionsError
-      ? vi.fn().mockRejectedValue(options.bindExtensionsError)
-      : vi.fn().mockResolvedValue(undefined),
+    bindExtensions: vi.fn(async () => {
+      if (options.bindExtensionsError) {
+        throw options.bindExtensionsError;
+      }
+      await options.onBindExtensions?.();
+    }),
     subscribe(nextCallbacks: PiSessionCallbacks) {
       if (options.subscribeError) {
         throw options.subscribeError;
@@ -241,6 +245,7 @@ function createPromptHarness(options: {
     trySteer,
     taskRunner,
     sendBusyReply,
+    prompt: fakePiSession.prompt,
     task: () => taskPromise,
     waitForOperation,
     run: (waitForCompletion = true) => handler(
@@ -484,6 +489,42 @@ describe("prompt handler", () => {
     await harness.task();
   });
 
+  it("keeps Abort hidden until extension binding succeeds, then publishes it before prompting", async () => {
+    const bindingStarted = deferred();
+    const bindingRelease = deferred();
+    const promptRelease = deferred();
+    let harness!: ReturnType<typeof createPromptHarness>;
+    harness = createPromptHarness({
+      onBindExtensions: async () => {
+        bindingStarted.resolve();
+        await bindingRelease.promise;
+      },
+      onPrompt: async () => {
+        expect(harness.operations).toContainEqual(expect.objectContaining({
+          kind: "send",
+          messageId: 1,
+          text: expect.stringMatching(/Working/i),
+          hasAbort: true,
+        }));
+        promptRelease.resolve();
+      },
+    });
+
+    await expect(harness.run(false)).resolves.toBe(true);
+    await bindingStarted.promise;
+    expect(harness.operations).not.toContainEqual(expect.objectContaining({
+      kind: "send",
+      text: expect.stringMatching(/Working/i),
+      hasAbort: true,
+    }));
+    expect(harness.prompt).not.toHaveBeenCalled();
+    expect(harness.operations).toContainEqual(expect.objectContaining({ kind: "typing" }));
+
+    bindingRelease.resolve();
+    await harness.task();
+    expect(harness.prompt).toHaveBeenCalledTimes(1);
+  });
+
   it("shows Abort while a prompt has no visible output", async () => {
     const promptRelease = deferred();
     const promptStarted = deferred();
@@ -605,6 +646,43 @@ describe("prompt handler", () => {
       consoleError.mockRestore();
     }
   });
+
+  it.each(["all", "errors-only"] as const)(
+    "puts Abort on the initial activity-off %s tool output when Working delivery fails",
+    async (toolVerbosity) => {
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      let sendCount = 0;
+      let harness!: ReturnType<typeof createPromptHarness>;
+      harness = createPromptHarness({
+        activityEnabled: false,
+        toolVerbosity,
+        onSend: () => {
+          sendCount += 1;
+          if (sendCount === 1) {
+            throw new Error("working send failed");
+          }
+        },
+        onPrompt: (callbacks) => {
+          callbacks.onToolStart("bash", "tool-1", {});
+          callbacks.onToolUpdate("tool-1", "stderr");
+          callbacks.onToolEnd("tool-1", true);
+        },
+      });
+
+      try {
+        await expect(harness.run()).resolves.toBe(true);
+        const toolMessage = harness.operations.find(
+          (operation) => operation.kind === "send"
+            && (toolVerbosity === "all" ? operation.text.includes("Running:") : operation.text.includes("❌")),
+        );
+        expect(toolMessage).toMatchObject({ messageId: 2, hasAbort: true });
+        expect(harness.trackCallbackMessages).toEqual([2]);
+        expect(harness.markupAttempts).not.toContainEqual({ messageId: 2, hasAbort: true });
+      } finally {
+        consoleError.mockRestore();
+      }
+    },
+  );
 
   it("preserves chronological activity-first output after adopting the working message", async () => {
     let harness!: ReturnType<typeof createPromptHarness>;
@@ -1260,18 +1338,25 @@ describe("prompt handler", () => {
   it.each([
     ["extension binding", { bindExtensionsError: new Error("bind failed") }],
     ["event subscription", { subscribeError: new Error("subscribe failed") }],
-  ])("finalizes controls and typing when %s rejects", async (_phase, failure) => {
+  ])("reports the failure and finalizes typing when %s rejects before Abort is published", async (_phase, failure) => {
     vi.useFakeTimers();
     const harness = createPromptHarness({ typingIntervalMs: 4_500, ...failure });
 
     try {
       await expect(harness.run()).resolves.toBe(false);
       expect(harness.operations).toEqual(expect.arrayContaining([
-        expect.objectContaining({ kind: "edit", messageId: 1, text: expect.stringMatching(/failed/i) }),
+        expect.objectContaining({
+          kind: "send",
+          messageId: 1,
+          text: expect.stringMatching(/bind failed|subscribe failed/),
+          hasAbort: false,
+        }),
       ]));
-      expect(harness.operations.filter(
-        (operation) => operation.kind === "send" || operation.kind === "edit",
-      )).toHaveLength(2);
+      expect(harness.operations).not.toContainEqual(expect.objectContaining({
+        kind: "send",
+        text: expect.stringMatching(/Working/i),
+        hasAbort: true,
+      }));
 
       const typingAfterSettlement = harness.operations.filter((operation) => operation.kind === "typing").length;
       await vi.advanceTimersByTimeAsync(9_000);
