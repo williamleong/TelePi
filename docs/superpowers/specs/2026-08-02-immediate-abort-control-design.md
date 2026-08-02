@@ -53,7 +53,7 @@ Failure finalization also drains pending output. If the temporary message still 
 
 ## Error handling and races
 
-- The working-message send is best effort. Its failure must not fail or delay the Pi prompt.
+- The working-message send is best effort. Its failure must not prevent the Pi prompt from starting.
 - The handler stores one promise for working-message creation so concurrent paths cannot send duplicates.
 - First-output adoption occurs only after working-message creation settles, preventing an output send from racing ahead and leaving a stale status message.
 - If adoption fails, the normal delivery failure path reports the failure; TelePi does not silently discard model output.
