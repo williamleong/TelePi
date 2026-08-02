@@ -197,10 +197,14 @@ function parseThinkingCharacters(text: string): ThinkingCharacter[] {
     const content = match?.[2] ?? segment;
     const trailing = match?.[3] ?? "";
     const boldMatch = /^\*\*((?:(?!\*\*)[\s\S])+?)\*\*$/.exec(content);
+    const boldContent = boldMatch?.[1];
+    const hasUnambiguousBoundaries = Boolean(
+      boldContent && !boldContent.startsWith("*") && !boldContent.endsWith("*"),
+    );
 
     appendThinkingText(characters, leading, false);
-    if (boldMatch) {
-      appendThinkingText(characters, boldMatch[1], true);
+    if (boldContent && hasUnambiguousBoundaries) {
+      appendThinkingText(characters, boldContent, true);
     } else {
       appendThinkingText(characters, content, false);
     }

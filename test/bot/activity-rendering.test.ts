@@ -192,6 +192,22 @@ describe("activity transcript", () => {
     expect(chunk?.fallbackText).toBe(`🧠 Thinking\n${fallback}`);
   });
 
+  it.each([
+    ["extra-leading-asterisk", "***text**"],
+    ["extra-trailing-asterisk", "**text***"],
+    ["extra-at-both-edges", "***text***"],
+  ])("keeps %s thinking boundaries literal", (_name, source) => {
+    const transcript = createActivityTranscript();
+    transcript.appendThinking({ blockKey: "1:0", delta: source });
+
+    expect(renderActivityTranscript(transcript)).toEqual([{
+      text: `🧠 Thinking\n${source}`,
+      fallbackText: `🧠 Thinking\n${source}`,
+      parseMode: "HTML",
+      sourceText: `🧠 Thinking\n${source}`,
+    }]);
+  });
+
   it("chunks long bold thinking lines into independently balanced bold HTML", () => {
     const source = `**${"x".repeat(9_000)}**`;
     const transcript = createActivityTranscript();
