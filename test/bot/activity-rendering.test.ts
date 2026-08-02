@@ -188,6 +188,19 @@ describe("activity transcript", () => {
     }]);
   });
 
+  it("normalizes trailing Bash detail before separating the next tool", () => {
+    const transcript = createActivityTranscript();
+    transcript.startTool("tool-1", "bash", { command: "printf 'x'\n" });
+    transcript.startTool("tool-2", "read", { path: "src/a.ts" });
+
+    expect(renderActivityTranscript(transcript)).toEqual([{
+      text: "<b>• ⌨️ Bash</b>\n<code>printf 'x'</code>\n\n<b>• 🔍 Read</b>\n<code>src/a.ts</code>",
+      fallbackText: "• ⌨️ Bash\nprintf 'x'\n\n• 🔍 Read\nsrc/a.ts",
+      parseMode: "HTML",
+      sourceText: "• ⌨️ Bash\nprintf 'x'\n\n• 🔍 Read\nsrc/a.ts",
+    }]);
+  });
+
   it("rolls over when the two-newline separator no longer fits", () => {
     const transcript = createActivityTranscript();
     transcript.appendThinking({ blockKey: "1:0", delta: "x".repeat(3949) });
