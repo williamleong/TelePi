@@ -2350,6 +2350,78 @@ describe("PiSessionService", () => {
     });
   });
 
+  it("persists topic session replacements and removes the topic record", async () => {
+    const store = TopicSessionStore.memory();
+    const registry = await PiSessionRegistry.create(createConfig(), store);
+    const context = { chatId: 9, messageThreadId: 3 };
+    const key = getPiSessionContextKey(context);
+    const service = await registry.getOrCreate(context);
+
+    await service.newSession();
+    expect(store.get(key)?.sessionFile).toBe(service.getInfo().sessionFile);
+
+    await service.switchSession("/sessions/s2.jsonl");
+    expect(store.get(key)).toEqual({
+      sessionFile: "/sessions/s2.jsonl",
+      workspace: service.getInfo().workspace,
+    });
+
+    await service.fork("entry-1");
+    expect(store.get(key)?.sessionFile).toBe(service.getInfo().sessionFile);
+
+    registry.remove(context);
+
+    expect(store.get(key)).toBeUndefined();
+    expect(service.hasActiveSession()).toBe(false);
+    expect(registry.get(context)).toBeUndefined();
+  });
+
+  it("clears the persisted topic session after successful handback", async () => {
+    const store = TopicSessionStore.memory();
+    const registry = await PiSessionRegistry.create(createConfig(), store);
+    const context = { chatId: 10, messageThreadId: 3 };
+    const key = getPiSessionContextKey(context);
+    const service = await registry.getOrCreate(context);
+
+    await service.handback();
+
+    expect(store.get(key)).toBeUndefined();
+  });
+
+  it("removes a persisted topic session without an in-memory service", async () => {
+    const store = TopicSessionStore.memory();
+    const registry = await PiSessionRegistry.create(createConfig(), store);
+    const context = { chatId: 10, messageThreadId: 4 };
+    const key = getPiSessionContextKey(context);
+    store.set(key, { sessionFile: "/sessions/saved.jsonl", workspace: "/workspace/saved" });
+
+    registry.remove(context);
+
+    expect(store.get(key)).toBeUndefined();
+  });
+
+  it("retains the persisted topic session when runtime replacements are cancelled", async () => {
+    const store = TopicSessionStore.memory();
+    const registry = await PiSessionRegistry.create(createConfig(), store);
+    const context = { chatId: 11, messageThreadId: 3 };
+    const key = getPiSessionContextKey(context);
+    const service = await registry.getOrCreate(context);
+    const initialRecord = store.get(key);
+    const runtime = mockState.createdRuntimes[0]?.runtime;
+
+    runtime.newSession.mockResolvedValueOnce({ cancelled: true });
+    await service.newSession();
+    expect(store.get(key)).toEqual(initialRecord);
+
+    runtime.switchSession.mockResolvedValueOnce({ cancelled: true });
+    await service.switchSession("/sessions/s2.jsonl");
+    expect(store.get(key)).toEqual(initialRecord);
+
+    runtime.fork.mockResolvedValueOnce({ cancelled: true });
+    await service.fork("entry-1");
+    expect(store.get(key)).toEqual(initialRecord);
+  });
+
   it("removes and disposes individual context services", async () => {
     const registry = await PiSessionRegistry.create(createConfig());
     const service = await registry.getOrCreate({ chatId: 9, messageThreadId: 3 });

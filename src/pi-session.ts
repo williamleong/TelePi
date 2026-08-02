@@ -83,6 +83,11 @@ export interface PiSessionInfo {
   diagnostics?: PiSessionDiagnostic[];
 }
 
+export interface PiSessionLocation {
+  sessionFile?: string;
+  workspace: string;
+}
+
 export interface PiSessionSwitchResult extends PiSessionInfo {
   cancelled: boolean;
 }
@@ -630,12 +635,18 @@ export class PiSessionService {
   private sessionUnsubscribe?: () => void;
   private extensionBindings?: Parameters<AgentSession["bindExtensions"]>[0];
 
-  private constructor(private readonly config: TelePiConfig) {
+  private constructor(
+    private readonly config: TelePiConfig,
+    private readonly onSessionChange?: (location: PiSessionLocation) => void,
+  ) {
     this.currentWorkspace = config.workspace;
   }
 
-  static async create(config: TelePiConfig): Promise<PiSessionService> {
-    const service = new PiSessionService(config);
+  static async create(
+    config: TelePiConfig,
+    onSessionChange?: (location: PiSessionLocation) => void,
+  ): Promise<PiSessionService> {
+    const service = new PiSessionService(config, onSessionChange);
     service.handle = await createPiSession(config);
     service.currentWorkspace = service.handle.runtime.cwd;
     return service;
@@ -802,6 +813,7 @@ export class PiSessionService {
     if (!this.handle || effectiveWorkspace !== this.currentWorkspace) {
       const nextHandle = await createNewPiSession(this.config, effectiveWorkspace, options);
       await this.replaceHandle(nextHandle);
+      this.notifySessionChange();
       return { info: this.getInfo(), created: true };
     }
 
@@ -812,7 +824,10 @@ export class PiSessionService {
       setup: options.setup,
       withSession: options.withSession,
     });
-    await this.rebindAfterRuntimeSessionReplacement(previousSession, previousWorkspace);
+    if (!result.cancelled) {
+      await this.rebindAfterRuntimeSessionReplacement(previousSession, previousWorkspace);
+      this.notifySessionChange();
+    }
     return { info: this.getInfo(), created: !result.cancelled };
   }
 
@@ -997,6 +1012,7 @@ export class PiSessionService {
     if (!this.handle) {
       const nextHandle = await createPiSession(this.config, runtimeSessionPath, effectiveWorkspace);
       await this.replaceHandle(nextHandle);
+      this.notifySessionChange();
       return {
         ...this.getInfo(),
         cancelled: false,
@@ -1009,7 +1025,10 @@ export class PiSessionService {
       cwdOverride: effectiveWorkspace,
       withSession: options.withSession,
     });
-    await this.rebindAfterRuntimeSessionReplacement(previousSession, previousWorkspace);
+    if (!result.cancelled) {
+      await this.rebindAfterRuntimeSessionReplacement(previousSession, previousWorkspace);
+      this.notifySessionChange();
+    }
     return {
       ...this.getInfo(),
       cancelled: result.cancelled,
@@ -1086,7 +1105,10 @@ export class PiSessionService {
     const previousSession = this.getSession();
     const previousWorkspace = this.currentWorkspace;
     const result = await this.getHandle().runtime.fork(entryId, options);
-    await this.rebindAfterRuntimeSessionReplacement(previousSession, previousWorkspace);
+    if (!result.cancelled) {
+      await this.rebindAfterRuntimeSessionReplacement(previousSession, previousWorkspace);
+      this.notifySessionChange();
+    }
     return { cancelled: result.cancelled };
   }
 
@@ -1149,6 +1171,7 @@ export class PiSessionService {
       console.error("Failed to dispose session during handback:", error);
     }
 
+    this.notifySessionChange();
     return info;
   }
 
@@ -1164,6 +1187,13 @@ export class PiSessionService {
 
     void handle.dispose().catch((error) => {
       console.error("Failed to dispose Pi session:", error);
+    });
+  }
+
+  private notifySessionChange(): void {
+    this.onSessionChange?.({
+      sessionFile: this.handle?.runtime.session.sessionFile,
+      workspace: this.currentWorkspace,
     });
   }
 
@@ -1321,7 +1351,21 @@ export class PiSessionRegistry {
     }
 
     const generation = this.bumpGeneration(key);
-    const createPromise = PiSessionService.create(this.createServiceConfig(key))
+    const onSessionChange = (location: PiSessionLocation) => {
+      try {
+        if (location.sessionFile) {
+          this.topicSessionStore.set(key, {
+            sessionFile: location.sessionFile,
+            workspace: location.workspace,
+          });
+        } else {
+          this.topicSessionStore.delete(key);
+        }
+      } catch {
+        console.warn(`Could not update Pi session for Telegram context ${key}.`);
+      }
+    };
+    const createPromise = PiSessionService.create(this.createServiceConfig(key), onSessionChange)
       .then((service) => {
         this.inflight.delete(key);
 
@@ -1337,11 +1381,7 @@ export class PiSessionRegistry {
         this.services.set(key, service);
         const { sessionFile, workspace } = service.getInfo();
         if (sessionFile) {
-          try {
-            this.topicSessionStore.set(key, { sessionFile, workspace });
-          } catch {
-            console.warn(`Could not save Pi session for Telegram context ${key}.`);
-          }
+          onSessionChange({ sessionFile, workspace });
         }
         return service;
       })
@@ -1361,6 +1401,11 @@ export class PiSessionRegistry {
     service?.dispose();
     this.services.delete(key);
     this.inflight.delete(key);
+    try {
+      this.topicSessionStore.delete(key);
+    } catch {
+      console.warn(`Could not remove Pi session for Telegram context ${key}.`);
+    }
   }
 
   dispose(): void {
