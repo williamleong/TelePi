@@ -6,6 +6,7 @@ import { formatError } from "../errors.js";
 import {
   appendWithCap,
   formatToolSummaryLine,
+  getAssistantSegmentDelivery,
   isMessageNotModifiedError,
   renderAssistantSegment,
   renderExtensionError,
@@ -118,6 +119,8 @@ async function runPromptFlow(
   let lastDeliveryAt = 0;
   let finalizationPromise: Promise<void> | undefined;
   let failureFinalizationPromise: Promise<void> | undefined;
+  let legacyDeliveryChain = Promise.resolve();
+  let legacyDeliveryFinalizing = false;
   let typingStopped = false;
 
   const sendTyping = (): void => {
@@ -181,6 +184,22 @@ async function runPromptFlow(
     abortOwnerMessageId = messageId;
   };
 
+  const enqueueLegacyDelivery = (delivery: () => Promise<void>, errorMessage: string): void => {
+    if (legacyDeliveryFinalizing || deliveryFinalizing || deliveryFinalized) {
+      return;
+    }
+
+    legacyDeliveryChain = legacyDeliveryChain
+      .then(delivery)
+      .catch((error) => {
+        console.error(errorMessage, error);
+      });
+  };
+
+  const drainLegacyDelivery = async (): Promise<void> => {
+    await legacyDeliveryChain;
+  };
+
   const ensureWorkingMessage = async (): Promise<void> => {
     if (statusMessageId !== undefined) {
       return;
@@ -221,9 +240,17 @@ async function runPromptFlow(
     return undefined;
   };
 
-  const renderSegment = (segment: StreamSegment): RenderedChunk[] => segment.kind === "assistant"
-    ? renderAssistantSegment(segment.assistantText)
-    : renderActivityTranscript(segment.activity!);
+  const renderSegment = (segment: StreamSegment): RenderedChunk[] => {
+    if (segment.kind === "activity") {
+      return renderActivityTranscript(segment.activity!);
+    }
+
+    const delivery = streamSegments.lockAssistantDelivery(
+      segment.id,
+      getAssistantSegmentDelivery(segment.assistantText),
+    );
+    return renderAssistantSegment(segment.assistantText, delivery);
+  };
 
   const deliverSegment = async (segment: StreamSegment): Promise<void> => {
     const revision = segment.revision;
@@ -399,9 +426,11 @@ async function runPromptFlow(
 
     finalizationPromise = (async () => {
       deliveryFinalizing = true;
+      legacyDeliveryFinalizing = true;
       clearDeliveryTimer();
       appendToolSummary();
       await drainDelivery();
+      await drainLegacyDelivery();
       await updateStatus("<b>✅ Done</b>", "✅ Done");
       await cleanupAbortOwners();
       deliveryFinalized = true;
@@ -417,7 +446,9 @@ async function runPromptFlow(
 
     failureFinalizationPromise = (async () => {
       deliveryFinalizing = true;
+      legacyDeliveryFinalizing = true;
       await drainDeliveryAfterFailure();
+      await drainLegacyDelivery();
       const status = renderPromptFailure("", error);
       try {
         await updateStatus(status, status);
@@ -452,7 +483,10 @@ async function runPromptFlow(
   }
 
   await ensureWorkingMessage();
-  await piSession.bindExtensions({
+
+  let unsubscribe: (() => void) | undefined;
+  try {
+    await piSession.bindExtensions({
     commandContextActions: {
       waitForIdle: async () => {
         await piSession.getSession().agent.waitForIdle();
@@ -497,9 +531,9 @@ async function runPromptFlow(
         console.error("Failed to send extension error", sendError);
       });
     },
-  });
+    });
 
-  const unsubscribe = piSession.subscribe({
+    unsubscribe = piSession.subscribe({
     onTextDelta: (delta) => {
       streamSegments.appendAssistantText(delta);
       void requestDelivery();
@@ -531,7 +565,7 @@ async function runPromptFlow(
         return;
       }
       const messageText = renderToolStartMessage(toolName);
-      void (async () => {
+      enqueueLegacyDelivery(async () => {
         const message = await sendTextMessage(bot.api, target, messageText.text, {
           parseMode: messageText.parseMode,
           fallbackText: messageText.fallbackText,
@@ -541,15 +575,12 @@ async function runPromptFlow(
           return;
         }
         state.messageId = message.message_id;
-        if (state.finalStatus) {
-          await safeEditMessage(bot, target, state.messageId, state.finalStatus.text, {
-            parseMode: state.finalStatus.parseMode,
-            fallbackText: state.finalStatus.fallbackText,
-          });
+        try {
+          await migrateAbortOwner(message.message_id);
+        } catch (error) {
+          console.error("Failed to migrate Telegram Abort button", error);
         }
-      })().catch((error) => {
-        console.error(`Failed to send tool start message for ${toolName}`, error);
-      });
+      }, `Failed to send tool start message for ${toolName}`);
     },
     onToolUpdate: (toolCallId, partialResult) => {
       if (activityEnabled || toolVerbosity === "none" || toolVerbosity === "summary") {
@@ -581,23 +612,29 @@ async function runPromptFlow(
         if (!isError) {
           return;
         }
-        void sendTextMessage(bot.api, target, state.finalStatus.text, {
-          parseMode: state.finalStatus.parseMode,
-          fallbackText: state.finalStatus.fallbackText,
-        }).catch((error) => {
-          console.error(`Failed to send tool error message for ${state.toolName}`, error);
+        enqueueLegacyDelivery(async () => {
+          const message = await sendTextMessage(bot.api, target, state.finalStatus!.text, {
+            parseMode: state.finalStatus!.parseMode,
+            fallbackText: state.finalStatus!.fallbackText,
+          });
+          try {
+            await migrateAbortOwner(message.message_id);
+          } catch (error) {
+            console.error("Failed to migrate Telegram Abort button", error);
+          }
+        }, `Failed to send tool error message for ${state.toolName}`);
+        return;
+      }
+      enqueueLegacyDelivery(async () => {
+        const currentState = toolStates.get(toolCallId);
+        if (currentState?.messageId === undefined || !currentState.finalStatus) {
+          return;
+        }
+        await safeEditMessage(bot, target, currentState.messageId, currentState.finalStatus.text, {
+          parseMode: currentState.finalStatus.parseMode,
+          fallbackText: currentState.finalStatus.fallbackText,
         });
-        return;
-      }
-      if (state.messageId === undefined) {
-        return;
-      }
-      void safeEditMessage(bot, target, state.messageId, state.finalStatus.text, {
-        parseMode: state.finalStatus.parseMode,
-        fallbackText: state.finalStatus.fallbackText,
-      }).catch((error) => {
-        console.error(`Failed to update tool message for ${state.toolName}`, error);
-      });
+      }, `Failed to update tool message for ${state.toolName}`);
     },
     onAgentEnd: () => {},
     onSessionInfoChanged: (sessionName) => {
@@ -611,7 +648,6 @@ async function runPromptFlow(
     },
   });
 
-  try {
     if (images && images.length > 0) {
       await piSession.prompt(userText, images);
     } else {
@@ -628,7 +664,7 @@ async function runPromptFlow(
   } finally {
     stopTyping();
     clearDeliveryTimer();
-    unsubscribe();
+    unsubscribe?.();
   }
 }
 

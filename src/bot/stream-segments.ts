@@ -2,7 +2,7 @@ import {
   createActivityTranscript,
   type ActivityTranscript,
 } from "./activity-rendering.js";
-import type { RenderedChunk } from "./message-rendering.js";
+import type { AssistantSegmentDelivery, RenderedChunk } from "./message-rendering.js";
 import type { PiThinkingDelta } from "../pi-session.js";
 
 export type StreamSegmentKind = "activity" | "assistant";
@@ -20,6 +20,7 @@ export interface StreamSegment {
   deliveredRevision: number;
   deliveryFailed: boolean;
   assistantText: string;
+  assistantDelivery?: AssistantSegmentDelivery;
   activity?: ActivityTranscript;
   chunks: SegmentChunkState[];
 }
@@ -31,6 +32,7 @@ export interface StreamSegments {
   finishTool(toolCallId: string, isError: boolean): StreamSegment | undefined;
   getSegments(): readonly StreamSegment[];
   getDirtySegments(): readonly StreamSegment[];
+  lockAssistantDelivery(segmentId: number, delivery: AssistantSegmentDelivery): AssistantSegmentDelivery | undefined;
   setRenderedChunks(segmentId: number, chunks: RenderedChunk[]): void;
   setChunkMessageId(segmentId: number, chunkIndex: number, messageId: number): void;
   markDelivered(segmentId: number, revision: number): void;
@@ -122,10 +124,26 @@ export function createStreamSegments(): StreamSegments {
         (segment) => segment.revision > segment.deliveredRevision && !segment.deliveryFailed,
       );
     },
+    lockAssistantDelivery(segmentId, delivery) {
+      const segment = findSegment(segmentId);
+      if (!segment || segment.kind !== "assistant") {
+        return undefined;
+      }
+
+      segment.assistantDelivery ??= delivery;
+      return segment.assistantDelivery;
+    },
     setRenderedChunks(segmentId, chunks) {
       const segment = findSegment(segmentId);
       if (!segment) {
         return;
+      }
+
+      const discardedMessageId = segment.chunks
+        .slice(chunks.length)
+        .find((chunk) => chunk.messageId !== undefined)?.messageId;
+      if (discardedMessageId !== undefined) {
+        throw new Error(`Cannot discard delivered Telegram chunk ${discardedMessageId}.`);
       }
 
       segment.chunks = chunks.map((rendered, index) => ({

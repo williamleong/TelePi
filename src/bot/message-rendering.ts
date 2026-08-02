@@ -8,6 +8,7 @@ import {
 
 export type TelegramParseMode = "HTML";
 export type TelegramDelivery = "rich-markdown";
+export type AssistantSegmentDelivery = "plain" | TelegramDelivery;
 
 export type RenderedText = {
   text: string;
@@ -482,12 +483,19 @@ export function splitMarkdownForTelegram(markdown: string): RenderedChunk[] {
   return chunks;
 }
 
-export function renderAssistantSegment(text: string): RenderedChunk[] {
+export function getAssistantSegmentDelivery(text: string): AssistantSegmentDelivery {
+  return isRichMarkdownCandidate(text) ? "rich-markdown" : "plain";
+}
+
+export function renderAssistantSegment(
+  text: string,
+  delivery = getAssistantSegmentDelivery(text),
+): RenderedChunk[] {
   if (!text) {
     return [];
   }
 
-  return isRichMarkdownCandidate(text)
+  return delivery === "rich-markdown"
     ? splitAssistantRichMarkdown(text)
     : splitAssistantMarkdown(text);
 }
