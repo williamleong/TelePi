@@ -37,6 +37,7 @@ import {
   resolveWorkspacePathForRuntime,
 } from "./pi-session-paths.js";
 import { assertPiSdkCompatibility } from "./pi-sdk-compatibility.js";
+import { buildLastExchangePreview, type PiSessionExchangePreview } from "./session-exchange-preview.js";
 import { describeEntry, type SessionTreeNodeLike as SessionTreeNode } from "./tree.js";
 
 /**
@@ -708,6 +709,11 @@ export class PiSessionService {
       return;
     }
     await this.handle.runtime.session.abort();
+  }
+
+  getLastExchangePreview(): PiSessionExchangePreview | undefined {
+    const messages = this.getSession().sessionManager.buildSessionContext().messages;
+    return buildLastExchangePreview(messages);
   }
 
   getContextUsage(): ContextUsage | undefined {
